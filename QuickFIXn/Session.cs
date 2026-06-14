@@ -390,13 +390,15 @@ public class Session : IDisposable
     {
         lock (_sync)
         {
-            // A-F5: tap before the null-responder early return so the outbound frame is always
-            // captured even when the session is disconnecting; the capture seam must see every
-            // generated outbound, not only frames that reach the wire. See IFixWireTap.
-            TapOutbound(message);
-
+            // A-F5 / M1: tap fires for every generated outbound frame, including phantom sends
+            // (when _responder is null or Send returns false). The transmitted flag tells the
+            // engine adapter whether the frame reached the wire, so it can mark the capture row
+            // accordingly rather than relying solely on the reconciliation arm.
             if (_responder is null)
+            {
+                TapOutbound(message, transmitted: false);
                 return false;
+            }
 
             if (Log.IsEnabled(MessagesLogLevel))
             {
@@ -410,7 +412,9 @@ public class Session : IDisposable
                 }
             }
 
-            return _responder.Send(message);
+            bool transmitted = _responder.Send(message);
+            TapOutbound(message, transmitted);
+            return transmitted;
         }
     }
 
@@ -466,6 +470,7 @@ public class Session : IDisposable
             _state.ReceivedReset = false;
             _state.SentReset = false;
             _state.ClearQueue();
+            TapInboundQueueCleared();
             // Drop the LogExtended resend-correlation cache; its seqnum keys are recycled next session.
             _resentTracker.Clear();
             _state.LogoutReason = "";
@@ -586,27 +591,55 @@ public class Session : IDisposable
         }
     }
 
-    private void TapInboundReplay(string rawFrame)
+    private void TapInboundQueued(SeqNumType seqNum)
     {
         if (_wireTap is null)
             return;
         try
         {
-            _wireTap.OnInboundReplay(SessionID, rawFrame);
+            _wireTap.OnInboundQueued(SessionID, seqNum);
         }
         catch (Exception e)
         {
-            Log.Log(LogLevel.Warning, "FIX wire-tap OnInboundReplay threw and was suppressed: {Error}", e.Message);
+            Log.Log(LogLevel.Warning, "FIX wire-tap OnInboundQueued threw and was suppressed: {Error}", e.Message);
         }
     }
 
-    private void TapOutbound(string rawFrame)
+    private void TapInboundReplayPrepare(SeqNumType seqNum)
     {
         if (_wireTap is null)
             return;
         try
         {
-            _wireTap.OnOutbound(SessionID, rawFrame);
+            _wireTap.OnInboundReplayPrepare(SessionID, seqNum);
+        }
+        catch (Exception e)
+        {
+            Log.Log(LogLevel.Warning, "FIX wire-tap OnInboundReplayPrepare threw and was suppressed: {Error}", e.Message);
+        }
+    }
+
+    private void TapInboundQueueCleared()
+    {
+        if (_wireTap is null)
+            return;
+        try
+        {
+            _wireTap.OnInboundQueueCleared(SessionID);
+        }
+        catch (Exception e)
+        {
+            Log.Log(LogLevel.Warning, "FIX wire-tap OnInboundQueueCleared threw and was suppressed: {Error}", e.Message);
+        }
+    }
+
+    private void TapOutbound(string rawFrame, bool transmitted)
+    {
+        if (_wireTap is null)
+            return;
+        try
+        {
+            _wireTap.OnOutbound(SessionID, rawFrame, transmitted);
         }
         catch (Exception e)
         {
@@ -1351,6 +1384,9 @@ public class Session : IDisposable
 
         Log.Log(LogLevel.Warning, "MsgSeqNum too high, expecting {NextSeqNum} but received {MsgSeqNum}", _state.NextTargetMsgSeqNum, msgSeqNum);
         _state.Queue(msgSeqNum, msg);
+        // §12.6 slot-spill: notify the engine adapter that this frame is now queued so it can
+        // spill the correlator's pending CaptureId slot into a keyed store keyed on seqNum.
+        TapInboundQueued(msgSeqNum);
 
         if (IsResendRequested)
         {
@@ -1908,18 +1944,21 @@ public class Session : IDisposable
             string msgType = msg.Header.GetString(Tags.MsgType);
             if (msgType.Equals(MsgType.LOGON) || msgType.Equals(MsgType.RESEND_REQUEST))
             {
+                // §12.6: notify the adapter to discard the spilled slot for this seqNum — the
+                // LOGON/RESEND skip branch does not call NextMessage, so FromApp will never take it.
+                TapInboundReplayPrepare(num);
                 _state.IncrNextTargetMsgSeqNum();
             }
             else
             {
-                // A-F1: re-tap the queued frame on replay so the engine capture correlator can
-                // slot a fresh CaptureId for this message; without this, the single-slot
-                // correlator has no pending id when NextMessage fires and the frame is un-captured.
+                // §12.6 slot-spill restore: notify the adapter to move the original CaptureId from
+                // its keyed store back into the correlator slot BEFORE NextMessage, so FromApp reads
+                // the correct id for this replayed frame without a second OnInbound call (no double
+                // capture row). Replaces the earlier A-F1 re-tap approach.
+                TapInboundReplayPrepare(num);
                 var reconstructed = msg.ConstructString();
-                TapInboundReplay(reconstructed);
                 // Set the queued flag BEFORE NextMessage so the replayed message's own Verify sees it
-                // (the #309 too-low SequenceReset-GapFill "obey anyway" case at Verify). The former
-                // post-loop assignment was a redundant duplicate that lagged the flag by one message.
+                // (the #309 too-low SequenceReset-GapFill "obey anyway" case at Verify).
                 _state.LastProcessedMessageWasQueued = true;
                 NextMessage(reconstructed);
             }
