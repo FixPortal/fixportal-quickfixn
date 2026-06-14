@@ -29,3 +29,27 @@ jobs:
       run: dotnet test --no-build --verbosity normal UnitTests
     - name: Acceptance
       run: dotnet test --no-build --verbosity normal AcceptanceTest
+
+  publish:
+    # Only publish on push to fpsim — not on PRs targeting fpsim.
+    if: github.event_name == 'push'
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+    - uses: actions/checkout@v4
+    - name: Setup .NET
+      uses: actions/setup-dotnet@v4
+      with:
+        dotnet-version: 8.0.x
+    - name: Pack
+      run: dotnet pack QuickFIXn.sln -c Release -o _pkgout
+    - name: Publish to GitHub Packages
+      run: |
+        dotnet nuget push "_pkgout/*.nupkg" \
+          --source "https://nuget.pkg.github.com/FixPortal/index.json" \
+          --api-key ${{ secrets.GITHUB_TOKEN }} \
+          --skip-duplicate
