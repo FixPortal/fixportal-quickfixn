@@ -20,8 +20,6 @@
     <PackageTags>QuickFIX QuickFIX/n FIX DataDictionary</PackageTags>
     <PackageReadmeFile>README.md</PackageReadmeFile>
     <PackageIcon>qfn-icon.png</PackageIcon>
-    <LangVersion>latest</LangVersion>
-    <Nullable>enable</Nullable>
     <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
   </PropertyGroup>
 
