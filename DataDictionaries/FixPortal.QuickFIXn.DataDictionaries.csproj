@@ -1,0 +1,41 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>netstandard2.0</TargetFramework>
+    <IncludeBuildOutput>false</IncludeBuildOutput>
+    <SuppressDependenciesWhenPacking>true</SuppressDependenciesWhenPacking>
+    <Title>QuickFIX/n FixPortal Data Dictionaries</Title>
+    <PackageId>FixPortal.QuickFIXn.DataDictionaries</PackageId>
+    <PackageTitle>$(Title)</PackageTitle>
+    <Description>FixPortal-customised QuickFIX/n FIX data dictionaries (the *_FP_QF.xml set plus stock support dictionaries), shipped as NuGet content under DataDictionary/.</Description>
+    <Copyright>Copyright © 2011 - $([System.DateTime]::UtcNow.Year) QuickFIXn.org. All rights reserved.</Copyright>
+    <Authors>Connamara Systems, LLC and QuickFIX/n contributors</Authors>
+    <Version>1.14.1-fixportal.3</Version>
+    <Platforms>AnyCPU;x64</Platforms>
+    <PackageRequireLicenseAcceptance>true</PackageRequireLicenseAcceptance>
+    <PackageLicenseFile>LICENSE</PackageLicenseFile>
+    <RepositoryUrl>https://github.com/FixPortal/fixportal-quickfixn</RepositoryUrl>
+    <RepositoryType>git</RepositoryType>
+    <PackageProjectUrl>http://quickfixn.org/</PackageProjectUrl>
+    <PackageTags>QuickFIX QuickFIX/n FIX DataDictionary</PackageTags>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+    <PackageIcon>qfn-icon.png</PackageIcon>
+    <LangVersion>latest</LangVersion>
+    <Nullable>enable</Nullable>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <None Include="..\LICENSE" Pack="true" PackagePath="" />
+    <None Include="..\nuget-enclosures\datadictionaries-readme.md" Pack="true" PackagePath="README.md" />
+    <None Include="..\nuget-enclosures\qfn-icon.png" Pack="true" PackagePath="" />
+  </ItemGroup>
+
+  <!-- Every dictionary under spec/FixPortal flattened into the package's DataDictionary/ folder.
+       The recursive glob picks up the customised *_FP_QF.xml and the stock support dicts; the
+       "Extension Pack Support" subtree (docs + python tooling) is intentionally excluded. -->
+  <ItemGroup>
+    <None Include="..\spec\FixPortal\*.xml" Pack="true" PackagePath="DataDictionary\%(Filename)%(Extension)" />
+  </ItemGroup>
+
+</Project>
