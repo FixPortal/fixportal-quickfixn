@@ -179,10 +179,8 @@ public class HttpServer : IDisposable {
                             throw new ApplicationException("unrecognized url");
                     }
                 } catch (Exception ex) {
-                    sb.AppendLine("    <h2 class=\"error-message\">An error occurred:</h2>");
-                    sb.AppendLine($"    <h2 class=\"error-message\">{ex.Message}</h2>");
-                    sb.AppendLine("    <div>Full exception info:</div>");
-                    sb.AppendLine($"    <pre>{ex}</pre>");
+                    sb.AppendLine("    <h2 class=\"error-message\">An error occurred processing your request.</h2>");
+                    Console.WriteLine($"HTTP server error: {ex}");
                 }
 
                 sb.AppendLine("  </body>");
