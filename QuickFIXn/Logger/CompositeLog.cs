@@ -116,23 +116,12 @@ internal class CompositeLog : ILog
         if (_disposed) return;
         if (disposing)
         {
-            List<Exception>? exceptions = null;
+            // FP Enhancement: never throw out of Dispose. Each child is disposed regardless of the others'
+            // failures; a rethrow here would abort the caller's teardown (e.g. session/acceptor disposal)
+            // and strand later resources. A child's Dispose is a no-op-on-failure best effort — swallow.
             foreach (var log in _logs)
             {
-                try
-                {
-                    log.Dispose();
-                }
-                catch (Exception ex)
-                {
-                    exceptions ??= new List<Exception>();
-                    exceptions.Add(ex);
-                }
-            }
-            _disposed = true;
-            if (exceptions is not null)
-            {
-                throw new AggregateException("One or more logs failed to dispose", exceptions);
+                try { log.Dispose(); } catch { /* best-effort: never propagate out of Dispose */ }
             }
         }
         _disposed = true;

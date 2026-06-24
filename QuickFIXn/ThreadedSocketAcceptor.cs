@@ -232,7 +232,13 @@ public class ThreadedSocketAcceptor : IAcceptor
 
     private void LogonAllSessions()
     {
-        foreach (Session session in _sessions.Values)
+        // FP Enhancement: snapshot under _sync before iterating. CreateSession/RemoveSession mutate
+        // _sessions under _sync, so a concurrent ad-hoc add/remove during start would otherwise throw
+        // InvalidOperationException out of this lock-free enumeration. Iterate the snapshot outside the
+        // lock so a slow/re-entrant session.Logon() callback never runs under the engine lock.
+        List<Session> sessions;
+        lock (_sync) { sessions = _sessions.Values.ToList(); }
+        foreach (Session session in sessions)
         {
             try
             {
@@ -248,7 +254,11 @@ public class ThreadedSocketAcceptor : IAcceptor
 
     private void LogoutAllSessions(bool force)
     {
-        foreach (Session session in _sessions.Values)
+        // FP Enhancement: snapshot under _sync (see LogonAllSessions) — avoids the collection-modified
+        // race against a concurrent CreateSession/RemoveSession during Stop.
+        List<Session> sessions;
+        lock (_sync) { sessions = _sessions.Values.ToList(); }
+        foreach (Session session in sessions)
         {
             try
             {
@@ -285,7 +295,11 @@ public class ThreadedSocketAcceptor : IAcceptor
 
     private void DisconnectSessions(string disconnectMessage)
     {
-        foreach (Session session in _sessions.Values)
+        // FP Enhancement: snapshot under _sync (see LogonAllSessions) — avoids the collection-modified
+        // race against a concurrent CreateSession/RemoveSession.
+        List<Session> sessions;
+        lock (_sync) { sessions = _sessions.Values.ToList(); }
+        foreach (Session session in sessions)
         {
             try
             {
