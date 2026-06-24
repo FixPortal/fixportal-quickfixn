@@ -57,7 +57,11 @@ public interface IFixWireTap
 
     /// <summary>Called when the session's inbound message queue is cleared (on disconnect /
     /// session reset). Allows the engine adapter to purge any spilled CaptureId entries for
-    /// this session that will never be replayed.</summary>
+    /// this session that will never be replayed. Like <see cref="OnOutbound"/>, this callback
+    /// fires inside the session's <c>_sync</c> lock (it is raised from <c>Disconnect</c>); the
+    /// implementation must not acquire any lock the FIX session thread could also hold, or it can
+    /// deadlock. (<see cref="OnInboundQueued"/> and <see cref="OnInboundReplayPrepare"/> fire
+    /// without <c>_sync</c> held.)</summary>
     /// <param name="sessionId">The session whose queue was cleared.</param>
     void OnInboundQueueCleared(SessionID sessionId) { }
 

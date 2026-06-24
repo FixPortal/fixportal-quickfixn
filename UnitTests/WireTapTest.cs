@@ -118,8 +118,9 @@ public class WireTapTest
 
         SendLogonTo(session);
 
-        // The acceptor answers the logon, so at least one outbound frame is tapped.
-        Assert.That(tap.Outbound, Is.Not.Empty);
+        // The acceptor answers the logon with exactly one outbound frame. Asserting the exact count
+        // (not just non-empty) catches a regression that fires OnOutbound twice for a single send.
+        Assert.That(tap.Outbound, Has.Count.EqualTo(1));
         Assert.That(tap.Outbound[0].Raw, Does.Contain("35=A"));
         Assert.That(tap.Outbound[0].Transmitted, Is.True, "M1: frames sent to a live responder must have Transmitted=true");
     }

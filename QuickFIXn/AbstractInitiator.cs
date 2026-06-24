@@ -255,16 +255,16 @@ public abstract class AbstractInitiator : IInitiator
 
         // Give OnStop() time to finish its business
         _thread?.Join(5000);
-        // Null _thread under _sync so Start()'s guard (which holds _sync) observes the cleared
-        // reference consistently and a fresh worker can be created on the next Start().
+
+        // Null _thread AND clear the session collections in a SINGLE _sync acquisition. Start()'s guard
+        // (which holds _sync) keys on `_thread is not null`; if these were two separate locks, a racing
+        // Start() could slip into the gap, observe the nulled _thread, pass the guard, and rebuild/start a
+        // worker against the not-yet-disposed _sessions — which this block would then dispose out from under
+        // the new worker. One acquisition makes "worker gone" and "sessions cleared" atomic w.r.t. the guard.
         lock (_sync)
         {
             _thread = null;
-        }
 
-        // dispose all sessions and clear all session sets
-        lock (_sync)
-        {
             foreach (Session s in _sessions.Values)
                 s.Dispose();
 
