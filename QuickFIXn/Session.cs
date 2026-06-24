@@ -668,8 +668,11 @@ public class Session : IDisposable
             }
         } catch (Exception ex)
         {
-            string safeMsg = msgStr.Length > 200 ? msgStr.Substring(0, 200) + "... [truncated due to error]" : msgStr;
-            Log.Log(LogLevel.Warning, ex, "Failed to format/redact incoming message. Raw start: {Message}", safeMsg);
+            // FP Enhancement: this catch fires precisely when RedactSensitiveFields threw, so msgStr is the
+            // raw, un-redacted frame and may carry sensitive tags (e.g. Password(554)). Logging any of its
+            // bytes here would defeat redaction on the one path that bypasses it — emit metadata only.
+            Log.Log(LogLevel.Warning, ex, "Failed to format/redact incoming message ({Length} bytes) — frame omitted to avoid leaking unredacted content.",
+                msgStr.Length);
         }
 
         MessageBuilder msgBuilder = new MessageBuilder(
