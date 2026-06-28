@@ -89,7 +89,6 @@ public class SessionSettings
     #endregion
 
 	// FP Enhancement: 2026-05-24 — FixPortal-specific session settings.
-	public const string VALIDATE_FIELD_ENUM_VALUES = "ValidateFieldEnumValues";
 	public const string ALLOW_STRING_TRUNCATION_FOR_CHAR_FIELDS = "AllowStringTruncationForCharFields";
 	public const string PASSWORD = "Password";
 
