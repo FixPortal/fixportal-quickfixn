@@ -179,3 +179,6 @@ _site/
 .understand-anything/
 graphify-out/
 
+# Semgrep Guardian local config
+.semgrep/
+
