@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Security.Cryptography;
 using System.Security.Cryptography.X509Certificates;
 using QuickFix.Util;
 
@@ -67,12 +68,24 @@ internal static class SslCertCache {
             throw new ApplicationException(msg);
         }
 
-        // TODO: fix .NET 10 deprecations:
-        //   'X509Certificate2.X509Certificate2(string, string?)' is obsolete:
-        //     'Loading certificate data through the constructor or Import is obsolete. Use X509CertificateLoader instead to load certificates.' (https://aka.ms/dotnet-warnings/SYSLIB0057)
+#if NET9_0_OR_GREATER
+        try
+        {
+            return password is null
+                ? X509CertificateLoader.LoadCertificateFromFile(name)
+                : X509CertificateLoader.LoadPkcs12FromFile(name, password);
+        }
+        catch (CryptographicException)
+        {
+            return password is null
+                ? X509CertificateLoader.LoadPkcs12FromFile(name, password)
+                : X509CertificateLoader.LoadCertificateFromFile(name);
+        }
+#else
         return password is not null
                 ? new X509Certificate2(name, password)
                 : new X509Certificate2(name);
+#endif
     }
 
     /// <summary>

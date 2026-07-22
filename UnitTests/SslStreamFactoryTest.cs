@@ -17,6 +17,9 @@ public class SslStreamFactoryTest
     const string DifferentCaCertificatePath = "OtherCaCertificate.cer";
     const string ServerCertificatePath = "serverCertificate.cer";
     const string ClientCertificatePath = "clientCertificate.cer";
+    const string PasswordlessPfxPath = "CaCertificate-passwordless.pfx";
+    const string PasswordProtectedPfxPath = "CaCertificate-protected.pfx";
+    const string PfxPassword = "test-password";
 
     X509Certificate2 CaCertificate { get; set; } = null!;
     X509Certificate2 ClientCertificate { get; set; } = null!;
@@ -27,6 +30,8 @@ public class SslStreamFactoryTest
     {
         var caCertificate = CreateCACertificate();
         File.WriteAllBytes(CaCertificatePath, caCertificate.Export(X509ContentType.Cert));
+        File.WriteAllBytes(PasswordlessPfxPath, caCertificate.Export(X509ContentType.Pfx));
+        File.WriteAllBytes(PasswordProtectedPfxPath, caCertificate.Export(X509ContentType.Pfx, PfxPassword));
         CaCertificate = caCertificate;
 
         var serverCertificate = CreateServerCertificate(caCertificate);
@@ -48,6 +53,18 @@ public class SslStreamFactoryTest
         File.Delete(DifferentCaCertificatePath);
         File.Delete(ServerCertificatePath);
         File.Delete(ClientCertificatePath);
+        File.Delete(PasswordlessPfxPath);
+        File.Delete(PasswordProtectedPfxPath);
+    }
+
+    [TestCase(PasswordlessPfxPath, null)]
+    [TestCase(PasswordProtectedPfxPath, PfxPassword)]
+    public void LoadCertificate_LoadsPkcs12(string path, string? password)
+    {
+        X509Certificate2? loaded = SslCertCache.LoadCertificate(path, password);
+
+        Assert.That(loaded, Is.Not.Null);
+        Assert.That(loaded!.Thumbprint, Is.EqualTo(CaCertificate.Thumbprint));
     }
 
     static X509Certificate2 CreateCACertificate()

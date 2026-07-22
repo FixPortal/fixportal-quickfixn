@@ -1126,4 +1126,15 @@ public class MessageTests
             "8=FIX.4.2|9=91|35=B|34=2|49=TW|52=20111011-15:06:23.103|56=ISLD|148=headline|33=1|58=line1|354=3|355=uno|"
         ));
     }
+
+    [Test]
+    public void CopyConstructor_PreservesRawMessage()
+    {
+        string rawMessage = "8=FIX.4.4|9=5|35=0|10=000|".Replace('|', Message.SOH);
+        var original = new Message(rawMessage, validate: false);
+
+        var copy = new Message(original);
+
+        Assert.That(copy.RawMessage, Is.EqualTo(rawMessage));
+    }
 }

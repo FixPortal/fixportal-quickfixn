@@ -368,7 +368,7 @@ public class Session : IDisposable
     public static bool SendToTarget(Message message, SessionID sessionID, bool removeDupeFlag = true, bool removeOriginalSendingTime = true)
     {
         message.SetSessionID(sessionID);
-        Session session = Session.LookupSession(sessionID);
+        Session? session = Session.LookupSession(sessionID);
         if (null == session)
             throw new SessionNotFound(sessionID);
         return session.Send(message, removeDupeFlag, removeOriginalSendingTime);

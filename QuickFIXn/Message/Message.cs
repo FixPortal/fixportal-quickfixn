@@ -16,7 +16,7 @@ namespace QuickFix;
 public class Message : FieldMap
 {
     // FP Enhancement: 2026-05-24 — captured at FromString time, before Clear() and the parse pipeline mutates anything. Downstream code (notably Log.OnRejectionEvent and Session.NotifyMessageRejected) needs the original wire string to correlate with the counterparty's view.
-    public string RawMessage { get; private set; }
+    public string RawMessage { get; private set; } = string.Empty;
 
     public const char SOH = '\u0001';
 
@@ -64,6 +64,7 @@ public class Message : FieldMap
     {
         Header = new Header(src.Header);
         Trailer = new Trailer(src.Trailer);
+        RawMessage = src.RawMessage;
         _isValid = src._isValid;
         _invalidField = src._invalidField;
     }
