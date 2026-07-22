@@ -189,7 +189,7 @@ public class SessionFactory
         // FP Enhancement: 2026-05-24 — ParsePath expands a `.\` prefix against AppDomain.CurrentDomain.BaseDirectory.
         path = Enhancements.Utility.ParsePath(StringUtil.FixSlashes(path));
 
-        DataDictionary.DataDictionary dd;
+        DataDictionary.DataDictionary? dd;
         lock (_dictionariesByPath)
         {
             if (!_dictionariesByPath.TryGetValue(path, out dd))

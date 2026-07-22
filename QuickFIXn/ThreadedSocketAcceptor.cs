@@ -34,6 +34,7 @@ public class ThreadedSocketAcceptor : IAcceptor
     /// <param name="settings"></param>
     /// <param name="logFactory">If null, a NullQuickFixLoggerFactory (which produces no logs) will be used.</param>
     /// <param name="messageFactory">If null, a DefaultMessageFactory will be created (using settings parameters)</param>
+    /// <param name="wireTap">Optional observer for raw FIX wire traffic.</param>
     public ThreadedSocketAcceptor(
         IApplication application,
         IMessageStoreFactory storeFactory,
@@ -58,6 +59,7 @@ public class ThreadedSocketAcceptor : IAcceptor
     /// <param name="settings"></param>
     /// <param name="loggerFactory">If null, a NullQuickFixLoggerFactory (which produces no logs) will be used.</param>
     /// <param name="messageFactory">If null, a DefaultMessageFactory will be created (using settings parameters)</param>
+    /// <param name="wireTap">Optional observer for raw FIX wire traffic.</param>
     public ThreadedSocketAcceptor(
         IApplication application,
         IMessageStoreFactory storeFactory,
