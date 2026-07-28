@@ -1,0 +1,53 @@
+reviews:
+  profile: assertive
+  poem: false
+  high_level_summary: true
+  review_status: true
+  collapse_walkthrough: true
+  request_changes_workflow: true
+
+  auto_review:
+    enabled: true
+    drafts: false
+    # This repo's mainline is `fpsim`, NOT the GitHub default branch (`master`, which
+    # tracks upstream QuickFIX/n and is never PR'd into). base_branches defaults to the
+    # default branch only, so without this line CodeRabbit would auto-review nothing:
+    # every real PR here targets fpsim. The default branch is always included, so this
+    # extends the set rather than replacing it.
+    base_branches:
+      - "fpsim"
+    # Pause automatic incremental reviews after 2 reviewed commits (default 5).
+    # CodeRabbit meters reviews per DEVELOPER IDENTITY across every repo, in a rolling
+    # 7-day window degrading from 30 reviews/7d, and every push spends one. This
+    # enforces push-batching mechanically instead of relying on remembering to batch.
+    auto_pause_after_reviewed_commits: 2
+    # Do NOT add ignore_title_keywords ("chore:" matches this estate's Dependabot
+    # titles) or ignore_usernames for dependabot[bot]/renovate[bot]. Dependency changes
+    # are classed HIGH in .claude/review-policy.json on supply-chain grounds, and Gitar
+    # already skips bot-authored PRs unless allow-listed — silencing CodeRabbit too
+    # would leave supply-chain PRs with no AI review at all.
+
+  path_filters:
+    - "!**/bin/**"
+    - "!**/obj/**"
+    - "!**/*.lock"
+
+  instructions: |
+    Review as a senior engineer. Prioritise correctness, security, maintainability,
+    testability, and accidental complexity.
+
+    Do not nitpick style unless it affects readability or consistency.
+    Prefer actionable findings over commentary.
+    Treat generated files, lock files, snapshots, and formatting churn as low value.
+
+    This is a FORK of QuickFIX/n (branch fpsim). Engine changes are deliberately gated —
+    prefer flagging risk over proposing broad refactors, and never suggest re-aligning
+    with upstream as a drive-by.
+
+    Data dictionaries under spec/ and DataDictionaries/ drive DDTool code generation
+    into a SHARED, name-keyed, processing-order-dependent namespace. A change scoped to
+    one FIX version can therefore alter field availability or naming for another. Treat
+    any dictionary edit as wire-affecting and say so explicitly.
+
+    Generated code (Messages/, Fields/, Tags.cs) should not be hand-edited; flag direct
+    edits there rather than reviewing them as ordinary source.
