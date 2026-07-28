@@ -1,0 +1,38 @@
+{
+  "$comment": [
+    "PR review risk tiering. Read by ~/.claude/hooks/pr-review-policy.sh.",
+    "Any file matching 'high' => HIGH (Gitar + CodeRabbit). All files matching 'low' => LOW.",
+    "Everything else => NORMAL (Gitar only). No match anywhere => NORMAL, deliberately.",
+    "",
+    "This is the QuickFIX/n fork (branch fpsim). spec/ and DataDictionaries/ are HIGH even",
+    "though they look like data files: they drive DDTool code generation, and the generated",
+    "field set is an additive, name-keyed, processing-order-dependent SHARED namespace.",
+    "A dictionary edit can therefore change wire behaviour for versions it never mentions.",
+    "See ~/.agents/notes/quickfixn-traps.md.",
+    "",
+    "LOW justification for THIS repo: docs/ and upstream-findings/ are analysis notes -",
+    "neither is compiled, generated from, or shipped. Messages/, Fields/ and Tags.cs are",
+    "generated CODE and are NORMAL, never low."
+  ],
+
+  "version": 1,
+
+  "high": [
+    ".claude/review-policy.json",
+    ".coderabbit.yaml",
+    ".gitignore",
+    "spec/**",
+    "DataDictionaries/**",
+    "DDTool/**",
+    ".github/workflows/**",
+    "Directory.Packages.props",
+    "**/*.csproj"
+  ],
+
+  "low": [
+    "docs/**",
+    "upstream-findings/**",
+    "*.md",
+    ".vscode/**"
+  ]
+}
