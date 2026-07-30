@@ -22,11 +22,15 @@ jobs:
       contents: read
 
     steps:
-    - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+    - uses: actions/checkout@v7
       with:
         persist-credentials: false
+    - name: Lint workflows (actionlint)
+      uses: raven-actions/actionlint@3d39aea434753780c3b3d4a1a31c854b4dbf49d7 # v2
+      with:
+        shellcheck: true
     - name: Setup .NET
-      uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
+      uses: actions/setup-dotnet@v6
       with:
         dotnet-version: 8.0.x
     - name: Restore dependencies
@@ -50,11 +54,11 @@ jobs:
       packages: write
 
     steps:
-    - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+    - uses: actions/checkout@v7
       with:
         persist-credentials: false
     - name: Setup .NET
-      uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
+      uses: actions/setup-dotnet@v6
       with:
         dotnet-version: 8.0.x
     - name: Pack
