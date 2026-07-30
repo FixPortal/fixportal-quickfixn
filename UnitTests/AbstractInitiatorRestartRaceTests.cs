@@ -1,4 +1,3 @@
-using System.Diagnostics;
 using System.Threading;
 using NUnit.Framework;
 using QuickFix;
@@ -19,6 +18,7 @@ public class AbstractInitiatorRestartRaceTests
     {
         public readonly ManualResetEventSlim Entered = new(false);
         public readonly ManualResetEventSlim Release = new(false);
+        public readonly ManualResetEventSlim StopEntered = new(false);
         public int OnStartCount;
 
         public GatedInitiator(IApplication app, IMessageStoreFactory store, SessionSettings settings)
@@ -32,7 +32,7 @@ public class AbstractInitiatorRestartRaceTests
         }
 
         protected override bool OnPoll(double timeout) => false;
-        protected override void OnStop() { }
+        protected override void OnStop() => StopEntered.Set();
         protected override void DoConnect(Session session, SettingsDictionary settings) { }
     }
 
@@ -66,24 +66,21 @@ public class AbstractInitiatorRestartRaceTests
         var stopper = new Thread(() => init.Stop(force: true));
         stopper.Start();
 
-        // Deterministically wait until Stop has entered the window (it sets IsStopped before Join).
-        var sw = Stopwatch.StartNew();
-        while (!init.IsStopped && sw.ElapsedMilliseconds < 5000)
-        {
-            Thread.Sleep(5);
-        }
+        // OnStop is called after IsStopped is set and immediately before Join, so this signal
+        // deterministically places the test inside the restart race window.
+        Assert.That(init.StopEntered.Wait(5000), Is.True, "Stop should enter the race window");
         Assert.That(init.IsStopped, Is.True, "Stop should have reached IsStopped=true (the race window)");
 
         // Race a Start now. With the fix it must refuse (a worker still exists); without it, Start
         // would flip IsStopped=false and spawn a second OnStart -> OnStartCount == 2.
         init.Start();
-        Thread.Sleep(200); // allow a wrongly-spawned worker to enter OnStart, if any
-        Assert.That(init.OnStartCount, Is.EqualTo(1),
-            "a Start racing an in-flight Stop must not resurrect/duplicate the worker thread");
 
-        // Release the gate so the old worker exits and Stop completes.
+        // Release both the original worker and any wrongly spawned replacement. Stop joins the
+        // current worker reference, so completion is the deterministic observation boundary.
         init.Release.Set();
         Assert.That(stopper.Join(5000), Is.True, "Stop should complete once the worker exits");
+        Assert.That(init.OnStartCount, Is.EqualTo(1),
+            "a Start racing an in-flight Stop must not resurrect/duplicate the worker thread");
 
         init.Dispose();
     }
