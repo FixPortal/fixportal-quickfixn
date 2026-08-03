@@ -29,7 +29,6 @@
   "high": [
     ".claude/review-policy.json",
     ".coderabbit.yaml",
-    ".gitignore",
     "spec/**",
     "DataDictionaries/**",
     "DDTool/**",
