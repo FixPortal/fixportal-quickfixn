@@ -16,7 +16,6 @@ import os
 import xml.etree.ElementTree as ET
 from defusedxml.ElementTree import parse as safe_parse
 from collections import OrderedDict
-import sys
 import copy
 
 # Paths are resolved relative to this script:

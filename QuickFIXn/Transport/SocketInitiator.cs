@@ -61,6 +61,7 @@ public class SocketInitiator : AbstractInitiator
             t.Session.Log.Log(LogLevel.Information, "Connection succeeded");
             t.Session.Next();
             while (t.Read()) {
+                // Read dispatches each complete message and returns whether the stream remains open.
             }
         }
         catch (IOException ex) // Can be exception when connecting, during ssl authentication or when reading
@@ -188,7 +189,7 @@ public class SocketInitiator : AbstractInitiator
         {
             try
             {
-                double reconnectIntervalAsMilliseconds = 1000 * _reconnectInterval;
+                double reconnectIntervalAsMilliseconds = 1000.0 * _reconnectInterval;
                 DateTime nowDt = DateTime.UtcNow;
 
                 if (nowDt.Subtract(_lastConnectTimeDt).TotalMilliseconds >= reconnectIntervalAsMilliseconds)

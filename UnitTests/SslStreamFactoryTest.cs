@@ -69,7 +69,7 @@ public class SslStreamFactoryTest
 
     static X509Certificate2 CreateCACertificate()
     {
-        var rsa = RSA.Create();
+        using var rsa = RSA.Create();
         var request = new CertificateRequest("CN=127.0.0.1 Test CA", rsa, HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1);
         request.CertificateExtensions.Add(new X509BasicConstraintsExtension(true, false, 0, true));
         request.CertificateExtensions.Add(new X509KeyUsageExtension(X509KeyUsageFlags.KeyCertSign | X509KeyUsageFlags.CrlSign, true));
@@ -81,7 +81,7 @@ public class SslStreamFactoryTest
 
     static X509Certificate2 CreateServerCertificate(X509Certificate2 caCertificate)
     {
-        var rsa = RSA.Create();
+        using var rsa = RSA.Create();
         var request = new CertificateRequest($"CN=127.0.0.1 Server Test", rsa, HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1);
 
         var enhancedKeyUsages = new OidCollection
@@ -96,7 +96,7 @@ public class SslStreamFactoryTest
 
     static X509Certificate2 CreateClientCertificate(X509Certificate2 caCertificate)
     {
-        var rsa = RSA.Create();
+        using var rsa = RSA.Create();
         var request = new CertificateRequest($"CN=127.0.0.1 Client Test", rsa, HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1);
 
         var enhancedKeyUsages = new OidCollection

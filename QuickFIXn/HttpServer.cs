@@ -96,6 +96,7 @@ public class HttpServer : IDisposable {
         if (_httpListener.IsListening) {
             _running = false;
             _httpListener.Stop();
+            _connectionThread.Join();
         }
     }
 
@@ -376,10 +377,6 @@ public class HttpServer : IDisposable {
         if (disposing) {
             if (_running)
                 Stop();
-
-#pragma warning disable SYSLIB0006
-            _connectionThread.Abort();
-#pragma warning restore SYSLIB0006
         }
 
         _disposed = true;

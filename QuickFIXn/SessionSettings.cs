@@ -105,9 +105,8 @@ public class SessionSettings
     {
         try
         {
-            FileStream fs = File.Open(file, FileMode.Open, FileAccess.Read);
-            Load(new StreamReader(fs));
-            fs.Close();
+            using StreamReader reader = File.OpenText(file);
+            Load(reader);
         }
         catch (System.Exception e)
         {
