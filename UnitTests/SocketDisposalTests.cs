@@ -18,6 +18,15 @@ public class SocketDisposalTests
     private TcpClient? _client;
     private TcpClient? _acceptedClient;
 
+    private static int FreeTcpPort()
+    {
+        TcpListener listener = new(IPAddress.Loopback, 0);
+        listener.Start();
+        int port = ((IPEndPoint)listener.LocalEndpoint).Port;
+        listener.Stop();
+        return port;
+    }
+
     [SetUp]
     public void Setup()
     {
@@ -126,6 +135,15 @@ public class SocketDisposalTests
 
         // Wait for the thread/task to unwind
         readTask.Wait(1000);
+    }
+
+    [Test]
+    public void HttpServer_DisposeAfterStart_DoesNotAbortItsThread()
+    {
+        using var server = new HttpServer($"http://localhost:{FreeTcpPort()}/", new SessionSettings());
+        server.Start();
+
+        Assert.DoesNotThrow(server.Dispose);
     }
 
     private class TestSocketInitiatorThread : SocketInitiatorThread
