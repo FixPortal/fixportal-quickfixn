@@ -13,7 +13,7 @@ public class SessionFactory
 {
     protected IApplication _application;
     protected IMessageStoreFactory _messageStoreFactory;
-    internal IQuickFixLoggerFactory _loggerFactory;
+    internal readonly IQuickFixLoggerFactory _loggerFactory;
     protected IMessageFactory _messageFactory;
     protected Dictionary<string, DataDictionary.DataDictionary> _dictionariesByPath = new();
 

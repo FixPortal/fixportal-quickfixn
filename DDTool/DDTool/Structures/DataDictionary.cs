@@ -106,8 +106,8 @@ public class DataDictionary
     /// </summary>
     /// <param name="fieldName"></param>
     public DDField LookupField(string fieldName) {
-        if (!FieldsByName.ContainsKey(fieldName))
+        if (!FieldsByName.TryGetValue(fieldName, out var field))
             throw new ParsingException($"Field '{fieldName}' is not defined in <fields> section.");
-        return FieldsByName[fieldName];
+        return field;
     }
 }

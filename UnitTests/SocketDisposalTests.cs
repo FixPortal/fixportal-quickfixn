@@ -20,7 +20,7 @@ public class SocketDisposalTests
 
     private static int FreeTcpPort()
     {
-        TcpListener listener = new(IPAddress.Loopback, 0);
+        using TcpListener listener = new(IPAddress.Loopback, 0);
         listener.Start();
         int port = ((IPEndPoint)listener.LocalEndpoint).Port;
         listener.Stop();

@@ -228,8 +228,8 @@ public class HttpServer : IDisposable {
             sb.AppendLine($"        <td>{(session.IsInitiator ? "initiator" : "acceptor")}");
             sb.AppendLine($"        <td>{(session.IsSessionTime ? "yes" : "no")}");
             sb.AppendLine($"        <td>{(session.IsLoggedOn ? "yes" : "no")}");
-            sb.AppendLine($"        <td>{session.NextTargetMsgSeqNum.ToString()}");
-            sb.AppendLine($"        <td>{session.NextSenderMsgSeqNum.ToString()}");
+            sb.AppendLine($"        <td>{session.NextTargetMsgSeqNum}");
+            sb.AppendLine($"        <td>{session.NextSenderMsgSeqNum}");
             sb.AppendLine("      </tr>");
         }
 
