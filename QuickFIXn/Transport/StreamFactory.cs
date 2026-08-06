@@ -119,11 +119,17 @@ internal static class StreamFactory
         }
 
         Stream stream = new NetworkStream(socket, true);
-
-        if (settings.UseSSL)
-            stream = new SslStreamFactory(settings, loggerFactory).CreateClientStreamAndAuthenticate(stream);
-
-        return stream;
+        try
+        {
+            return settings.UseSSL
+                ? new SslStreamFactory(settings, loggerFactory).CreateClientStreamAndAuthenticate(stream)
+                : stream;
+        }
+        catch
+        {
+            stream.Dispose();
+            throw;
+        }
     }
 
     /// <summary>
