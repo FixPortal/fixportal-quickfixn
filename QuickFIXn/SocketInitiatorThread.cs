@@ -61,13 +61,17 @@ public class SocketInitiatorThread : IResponder
 
     public void Join()
     {
-        if (_thread is null)
+        Thread? worker;
+        lock (_completionSync)
+            worker = _thread;
+        if (worker is null)
             return;
         Disconnect();
         // Make sure session's socket reader thread doesn't try to do a Join on itself!
-        if (Environment.CurrentManagedThreadId != _thread.ManagedThreadId)
-            _thread.Join(2000);
-        _thread = null;
+        if (Environment.CurrentManagedThreadId != worker.ManagedThreadId)
+            worker.Join(2000);
+        lock (_completionSync)
+            _thread = null;
     }
 
     internal bool TryRunWhenExited(Action callback)
@@ -108,16 +112,26 @@ public class SocketInitiatorThread : IResponder
                 throw new OperationCanceledException("Connection setup was cancelled");
             }
             _stream = stream;
-            try
+        }
+
+        try
+        {
+            Session.SetResponder(this);
+            lock (_disconnectSync)
             {
-                Session.SetResponder(this);
+                if (!_disconnected)
+                    return;
             }
-            catch
-            {
+
+            Session.Disconnect("Connection setup was cancelled");
+            throw new OperationCanceledException("Connection setup was cancelled");
+        }
+        catch
+        {
+            lock (_disconnectSync)
                 _stream = null;
-                stream.Dispose();
-                throw;
-            }
+            stream.Dispose();
+            throw;
         }
     }
 
@@ -134,9 +148,14 @@ public class SocketInitiatorThread : IResponder
             return Transport.StreamFactory.CreateClientStream(
                 _socketEndPoint, _socketSettings, _loggerFactory, cancellationToken);
         }
-        catch (Exception) when (cancellationToken.IsCancellationRequested)
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
-            throw new OperationCanceledException(cancellationToken);
+            throw;
+        }
+        catch (Exception ex) when (cancellationToken.IsCancellationRequested)
+        {
+            throw new OperationCanceledException(
+                "Connection setup was cancelled", ex, cancellationToken);
         }
     }
 

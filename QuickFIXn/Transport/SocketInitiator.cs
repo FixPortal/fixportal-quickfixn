@@ -4,7 +4,6 @@ using System.IO;
 using System.Linq;
 using System.Net;
 using System.Net.Sockets;
-using System.Runtime.ExceptionServices;
 using System.Threading;
 using Microsoft.Extensions.Logging;
 using QuickFix.Logger;
@@ -29,6 +28,8 @@ public class SocketInitiator : AbstractInitiator
     private readonly object _connectRequestSync = new();
     private readonly HashSet<SessionID> _connectRequests = [];
     private CancellationTokenSource _connectionSetupCancellation = new();
+    private readonly Dictionary<CancellationTokenSource, int> _connectionSetupUsers = new();
+    private bool _disposeConnectionSetupCancellations;
     private readonly ILogger _nonSessionLog;
 
     public SocketInitiator(
@@ -79,18 +80,6 @@ public class SocketInitiator : AbstractInitiator
             {
                 // Expected when shutdown interrupts connection setup.
             }
-            catch (IOException ex) // Can be exception when connecting, during ssl authentication or when reading
-            {
-                LogThreadStartConnectionFailed(t, ex);
-            }
-            catch (SocketException ex)
-            {
-                LogThreadStartConnectionFailed(t, ex);
-            }
-            catch (System.Security.Authentication.AuthenticationException ex) // some certificate problems
-            {
-                LogThreadStartConnectionFailed(t, ex);
-            }
             catch (Exception ex)
             {
                 LogThreadStartConnectionFailed(t, ex);
@@ -111,7 +100,15 @@ public class SocketInitiator : AbstractInitiator
         }
 
         if (failure is not null)
-            ExceptionDispatchInfo.Capture(failure).Throw();
+        {
+            try
+            {
+                t.Initiator._nonSessionLog.Log(
+                    LogLevel.Error, failure,
+                    "Socket initiator reader thread terminated during cleanup: {Message}", failure.Message);
+            }
+            catch { }
+        }
     }
 
     // FP Enhancement: 2026-08-06 — make connection activation atomic with initiator shutdown.
@@ -122,11 +119,11 @@ public class SocketInitiator : AbstractInitiator
         {
             if (_shutdownRequested || !TrySetConnected(thread.Session))
                 return false;
-
-            thread.Session.Log.Log(LogLevel.Information, "Connection succeeded");
-            thread.Session.Next();
-            return true;
         }
+
+        thread.Session.Log.Log(LogLevel.Information, "Connection succeeded");
+        thread.Session.Next();
+        return true;
     }
 
     private static void LogThreadStartConnectionFailed(SocketInitiatorThread t, Exception e) {
@@ -162,7 +159,10 @@ public class SocketInitiator : AbstractInitiator
         {
             thread.Join();
         }
-        catch { }
+        catch (Exception ex)
+        {
+            _nonSessionLog.Log(LogLevel.Warning, ex, "Socket reader thread cleanup failed.");
+        }
     }
 
     // FP Enhancement: 2026-08-06 — detach socket workers under lock and join them after releasing it.
@@ -179,7 +179,10 @@ public class SocketInitiator : AbstractInitiator
         {
             thread.Join();
         }
-        catch { }
+        catch (Exception ex)
+        {
+            _nonSessionLog.Log(LogLevel.Warning, ex, "Socket reader thread cleanup failed.");
+        }
         return thread;
     }
 
@@ -214,6 +217,10 @@ public class SocketInitiator : AbstractInitiator
 
             return new IPEndPoint(addr, port);
         }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
         catch (Exception e)
         {
             throw new ConfigError(e.Message, e);
@@ -229,13 +236,16 @@ public class SocketInitiator : AbstractInitiator
     protected override void OnConfigure(SessionSettings settings)
     {
         CancellationTokenSource previousCancellation;
+        bool disposePrevious;
         lock (_connectRequestSync)
         {
             previousCancellation = _connectionSetupCancellation;
             _connectionSetupCancellation = new CancellationTokenSource();
+            disposePrevious = !_connectionSetupUsers.ContainsKey(previousCancellation);
             _shutdownRequested = false;
         }
-        previousCancellation.Dispose();
+        if (disposePrevious)
+            previousCancellation.Dispose();
 
         try
         {
@@ -286,13 +296,19 @@ public class SocketInitiator : AbstractInitiator
                 {
                     if (_shutdownRequested)
                         return;
-                    if (!_shutdownRequested && _connectRequests.Count == 0)
+                    if (_connectRequests.Count == 0)
                         Monitor.Wait(_connectRequestSync, 1000);
                 }
             }
             catch (Exception e)
             {
                 _nonSessionLog.Log(LogLevel.Error, e, "Failed to start: {Message}", e.Message);
+                lock (_connectRequestSync)
+                {
+                    if (_shutdownRequested)
+                        return;
+                    Monitor.Wait(_connectRequestSync, 1000);
+                }
             }
         }
     }
@@ -384,18 +400,25 @@ public class SocketInitiator : AbstractInitiator
             {
                 thread.Join();
             }
-            catch { }
+            catch (Exception ex)
+            {
+                _nonSessionLog.Log(LogLevel.Warning, ex, "Socket reader thread cleanup failed.");
+            }
         }
     }
 
     protected override void DoConnect(Session session, SettingsDictionary settings)
     {
+        CancellationTokenSource connectionSetupCancellation;
         CancellationToken cancellationToken;
         lock (_connectRequestSync)
         {
             if (_shutdownRequested)
                 return;
-            cancellationToken = _connectionSetupCancellation.Token;
+            connectionSetupCancellation = _connectionSetupCancellation;
+            _connectionSetupUsers.TryGetValue(connectionSetupCancellation, out int users);
+            _connectionSetupUsers[connectionSetupCancellation] = users + 1;
+            cancellationToken = connectionSetupCancellation.Token;
         }
 
         bool restoreDisconnectedOnFailure = false;
@@ -448,6 +471,32 @@ public class SocketInitiator : AbstractInitiator
                 SetDisconnected(session);
             session.Log.Log(LogLevel.Error, e, "Connection error: {Message}", e.Message);
         }
+        finally
+        {
+            ReleaseConnectionSetupCancellation(connectionSetupCancellation);
+        }
+    }
+
+    private void ReleaseConnectionSetupCancellation(CancellationTokenSource cancellation)
+    {
+        bool dispose = false;
+        lock (_connectRequestSync)
+        {
+            int remainingUsers = _connectionSetupUsers[cancellation] - 1;
+            if (remainingUsers == 0)
+            {
+                _connectionSetupUsers.Remove(cancellation);
+                dispose = _disposeConnectionSetupCancellations
+                    || !ReferenceEquals(cancellation, _connectionSetupCancellation);
+            }
+            else
+            {
+                _connectionSetupUsers[cancellation] = remainingUsers;
+            }
+        }
+
+        if (dispose)
+            cancellation.Dispose();
     }
 
     #endregion
@@ -461,7 +510,16 @@ public class SocketInitiator : AbstractInitiator
         finally
         {
             if (disposing)
-                _connectionSetupCancellation.Dispose();
+            {
+                CancellationTokenSource? cancellationToDispose = null;
+                lock (_connectRequestSync)
+                {
+                    _disposeConnectionSetupCancellations = true;
+                    if (!_connectionSetupUsers.ContainsKey(_connectionSetupCancellation))
+                        cancellationToDispose = _connectionSetupCancellation;
+                }
+                cancellationToDispose?.Dispose();
+            }
         }
     }
 }

@@ -19,6 +19,7 @@ using QuickFix.Transport;
 namespace UnitTests;
 
 [TestFixture]
+[NonParallelizable]
 public class SocketInitiatorLifecycleTests
 {
     private sealed class SettingsReadingApplication(SessionSettings settings) : IApplication
@@ -121,7 +122,9 @@ public class SocketInitiatorLifecycleTests
 
     private static void SetComparer(SettingsDictionary settings, IEqualityComparer<string> comparer)
     {
-        FieldInfo dataField = typeof(SettingsDictionary).GetField("_data", BindingFlags.Instance | BindingFlags.NonPublic)!;
+        FieldInfo dataField = typeof(SettingsDictionary).GetField(
+            "_data", BindingFlags.Instance | BindingFlags.NonPublic)
+            ?? throw new InvalidOperationException("SettingsDictionary._data was not found");
         var data = (Dictionary<string, string>)dataField.GetValue(settings)!;
         dataField.SetValue(settings, new Dictionary<string, string>(data, comparer));
     }
@@ -490,6 +493,10 @@ public class SocketInitiatorLifecycleTests
             base.OnStop();
         }
 
+        protected override void DoConnect(Session session, SettingsDictionary settings)
+        {
+        }
+
         public void RequestWorkerStop() => base.OnStop();
     }
 
@@ -582,6 +589,8 @@ public class SocketInitiatorLifecycleTests
 
         public ManualResetEventSlim SecondStopEntered { get; } = new();
         public int WorkerStarts;
+        public int FirstStopCompleted;
+        public int SecondStopEnteredBeforeFirstCompleted;
 
         protected override void OnConfigure(SessionSettings settings)
         {
@@ -603,9 +612,12 @@ public class SocketInitiatorLifecycleTests
             {
                 _firstStopPaused.Set();
                 _releaseFirstStop.Wait();
+                Interlocked.Exchange(ref FirstStopCompleted, 1);
             }
             else
             {
+                if (Volatile.Read(ref FirstStopCompleted) == 0)
+                    Interlocked.Exchange(ref SecondStopEnteredBeforeFirstCompleted, 1);
                 SecondStopEntered.Set();
             }
         }
@@ -669,18 +681,21 @@ public class SocketInitiatorLifecycleTests
         var stream = new RecordingStream();
         using var initiator = new GatedConnectionSocketInitiator(
             InitiatorSettings(), setupEntered, releaseSetup, stream);
+        GatedSetupSocketInitiatorThread? connectionThread = null;
 
         try
         {
             initiator.Start();
             Assert.That(setupEntered.Wait(5000), Is.True, "connection setup should reach its gate");
+            connectionThread = initiator.ConnectionThread
+                ?? throw new InvalidOperationException("Connection thread was not created");
 
             initiator.Stop(force: true);
-            Assert.That(initiator.ConnectionThread!.Session.Disposed, Is.True,
+            Assert.That(connectionThread.Session.Disposed, Is.True,
                 "stop should dispose the session before setup completes");
 
             releaseSetup.Set();
-            initiator.ConnectionThread.Join();
+            connectionThread.Join();
 
             Assert.That(stream.IsDisposed, Is.True, "a stream completed after disconnect must be disposed");
             Assert.That(stream.WriteCount, Is.Zero, "a stopped session must not publish a late Logon");
@@ -688,8 +703,8 @@ public class SocketInitiatorLifecycleTests
         finally
         {
             releaseSetup.Set();
-            initiator.ConnectionThread?.Disconnect();
-            initiator.ConnectionThread?.Join();
+            connectionThread?.Disconnect();
+            connectionThread?.Join();
         }
     }
 
@@ -845,9 +860,59 @@ public class SocketInitiatorLifecycleTests
 
         Assert.That(
             () => SocketInitiator.SocketInitiatorThreadStart(thread),
-            Throws.TypeOf<InvalidOperationException>().With.Message.EqualTo("logging failed"));
+            Throws.Nothing,
+            "a reader-thread cleanup failure must not escape and terminate the host process");
         Assert.That(Volatile.Read(ref completionCalls), Is.EqualTo(1),
             "reader-exit completion must run even when connection-failure logging throws");
+    }
+
+    [Test]
+    public void JoinUsesStableWorkerReferenceWhenReaderSignalsExit()
+    {
+        SessionSettings settings = InitiatorSettings();
+        var sessionId = new SessionID("FIX.4.2", "INIT_SENDER", "INIT_TARGET");
+        using var initiator = new NoConnectionSocketInitiator(settings, new MemoryStoreFactory());
+        initiator.Start();
+        var thread = new SocketInitiatorThread(
+            initiator,
+            Session.LookupSession(sessionId)!,
+            new IPEndPoint(IPAddress.Loopback, 1),
+            new SocketSettings(),
+            new LogFactoryAdapter(new NullLogFactory()));
+        using var releaseWorker = new ManualResetEventSlim();
+        var worker = new Thread(releaseWorker.Wait);
+        worker.Start();
+        typeof(SocketInitiatorThread).GetField("_thread", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .SetValue(thread, worker);
+        var readCompletion = new TaskCompletionSource<int>(TaskCreationOptions.RunContinuationsAsynchronously);
+        typeof(SocketInitiatorThread).GetField("_currentReadTask", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .SetValue(thread, readCompletion.Task);
+        Exception? joinFailure = null;
+        var joiner = new Thread(() =>
+        {
+            try { thread.Join(); }
+            catch (Exception ex) { joinFailure = ex; }
+        });
+
+        try
+        {
+            joiner.Start();
+            Assert.That(SpinWait.SpinUntil(
+                () => joiner.ThreadState.HasFlag(ThreadState.WaitSleepJoin), 5000), Is.True);
+            thread.SignalExited();
+            readCompletion.SetResult(0);
+            releaseWorker.Set();
+
+            Assert.That(joiner.Join(5000), Is.True);
+            Assert.That(joinFailure, Is.Null);
+        }
+        finally
+        {
+            readCompletion.TrySetResult(0);
+            releaseWorker.Set();
+            joiner.Join(5000);
+            worker.Join(5000);
+        }
     }
 
     [TestCase(false, TestName = "RemoveSessionRetainsReservationUntilTimedOutReaderActuallyExits")]
@@ -959,15 +1024,18 @@ public class SocketInitiatorLifecycleTests
         var sessionId = new SessionID("FIX.4.2", "INIT_SENDER", "INIT_TARGET");
         SettingsDictionary sessionSettings = settings.Get(sessionId);
         using var initiator = new AbaSocketInitiator(settings, oldSetupEntered, releaseOldSetup, oldStream);
+        GatedSetupSocketInitiatorThread? oldThread = null;
         TcpClient? replacementPeer = null;
 
         try
         {
             initiator.Start();
             Assert.That(oldSetupEntered.Wait(5000), Is.True, "old connection setup should reach its gate");
+            oldThread = initiator.OldThread
+                ?? throw new InvalidOperationException("Old connection thread was not created");
 
             Assert.That(initiator.RemoveSession(sessionId, terminateActiveSession: true), Is.True);
-            Assert.That(initiator.OldThread!.WaitForCompletion(0), Is.False,
+            Assert.That(oldThread.WaitForCompletion(0), Is.False,
                 "old setup should outlive bounded transport cleanup");
             Assert.That(initiator.AddSession(sessionId, sessionSettings), Is.True);
 
@@ -979,7 +1047,7 @@ public class SocketInitiatorLifecycleTests
 
             releaseOldSetup.Set();
 
-            Assert.That(initiator.OldThread.WaitForCompletion(5000), Is.True,
+            Assert.That(oldThread.WaitForCompletion(5000), Is.True,
                 "old connection worker should complete after setup is released");
             Assert.That(oldStream.WriteCount, Is.Zero,
                 "an old session instance must not activate against replacement pending state");
@@ -1006,8 +1074,8 @@ public class SocketInitiatorLifecycleTests
         finally
         {
             releaseOldSetup.Set();
-            initiator.OldThread?.Disconnect();
-            initiator.OldThread?.Join();
+            oldThread?.Disconnect();
+            oldThread?.Join();
             replacementPeer?.Dispose();
             listener.Stop();
         }
@@ -1147,6 +1215,8 @@ public class SocketInitiatorLifecycleTests
         using var releaseConfigure = new ManualResetEventSlim();
         using var firstStopPaused = new ManualResetEventSlim();
         using var releaseFirstStop = new ManualResetEventSlim();
+        using var firstStopAttempted = new ManualResetEventSlim();
+        using var secondStopAttempted = new ManualResetEventSlim();
         using var initiator = new ConcurrentStopSocketInitiator(
             InitiatorSettings(), configureEntered, releaseConfigure, firstStopPaused, releaseFirstStop);
         Thread? starter = null;
@@ -1162,26 +1232,23 @@ public class SocketInitiatorLifecycleTests
 
             firstStopper = new Thread(() =>
             {
+                firstStopAttempted.Set();
                 initiator.Stop(force: true);
             });
             secondStopper = new Thread(() =>
             {
+                secondStopAttempted.Set();
                 initiator.Stop(force: true);
             });
             firstStopper.Start();
             secondStopper.Start();
-            Assert.That(SpinWait.SpinUntil(
-                    () => firstStopper.ThreadState.HasFlag(ThreadState.WaitSleepJoin)
-                          && secondStopper.ThreadState.HasFlag(ThreadState.WaitSleepJoin),
-                    5000),
-                Is.True, "both stop callers should be queued behind initial configuration");
+            Assert.That(firstStopAttempted.Wait(5000), Is.True);
+            Assert.That(secondStopAttempted.Wait(5000), Is.True);
 
             releaseConfigure.Set();
             Assert.That(starter.Join(5000), Is.True);
             Assert.That(firstStopPaused.Wait(5000), Is.True,
                 "the first stop should pause before completing its lifecycle");
-            Assert.That(initiator.SecondStopEntered.Wait(250), Is.False,
-                "a concurrent stop must not enter lifecycle cleanup before the first stop completes");
 
             initiator.Start();
             Assert.That(Volatile.Read(ref initiator.WorkerStarts), Is.EqualTo(1),
@@ -1190,6 +1257,8 @@ public class SocketInitiatorLifecycleTests
             releaseFirstStop.Set();
             Assert.That(firstStopper.Join(5000), Is.True);
             Assert.That(secondStopper.Join(5000), Is.True);
+            Assert.That(Volatile.Read(ref initiator.SecondStopEnteredBeforeFirstCompleted), Is.Zero,
+                "a concurrent stop must not enter lifecycle cleanup before the first stop completes");
 
             initiator.Start();
             Assert.That(SpinWait.SpinUntil(

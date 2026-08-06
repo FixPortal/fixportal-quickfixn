@@ -100,28 +100,37 @@ public abstract class AbstractInitiator : IInitiator
             if (_disposed)
                 throw new ObjectDisposedException(this.GetType().Name);
 
+            Thread worker;
             lock (_settings)
             {
                 lock (_sync)
                 {
                     if (_thread is not null)
                         return;
+                }
 
-                    foreach (SessionID sessionId in _settings.GetSessions())
-                    {
-                        SettingsDictionary dict = _settings.Get(sessionId);
-                        CreateSession(sessionId, dict);
-                    }
+                foreach (SessionID sessionId in _settings.GetSessions())
+                {
+                    SettingsDictionary dict = _settings.Get(sessionId);
+                    CreateSession(sessionId, dict);
+                }
 
+                lock (_sync)
+                {
                     if (0 == _sessions.Count)
                         throw new ConfigError("No sessions defined for initiator");
+                }
 
+                // Transport configuration has its own admission lock; do not invert it with _sync.
+                OnConfigure(_settings);
+                worker = new Thread(OnStart);
+                lock (_sync)
+                {
                     IsStopped = false;
-                    OnConfigure(_settings);
-                    _thread = new Thread(OnStart);
-                    _thread.Start();
+                    _thread = worker;
                 }
             }
+            worker.Start();
         }
         finally
         {
@@ -185,6 +194,8 @@ public abstract class AbstractInitiator : IInitiator
     /// <param name="sessionId">ID of session to be removed</param>
     /// <param name="terminateActiveSession">if true, force disconnection and removal of session even if it has an active connection</param>
     /// <returns>true if session removed or not already present; false if could not be removed due to an active connection</returns>
+    /// <remarks>A duplicate call returns true while cleanup is still in progress; the same ID cannot be added again until cleanup completes.</remarks>
+    /// <exception cref="Exception">Session disposal failures, including message-store disposal failures, are propagated.</exception>
     public bool RemoveSession(SessionID sessionId, bool terminateActiveSession)
     {
         Session? session = null;
@@ -566,14 +577,17 @@ public abstract class AbstractInitiator : IInitiator
     /// <param name="disposing"></param>
     protected virtual void Dispose(bool disposing)
     {
+        if (!disposing)
+        {
+            _disposed = true;
+            return;
+        }
+
         lock (_lifecycleSync)
         {
             if (_disposed) return;
-            if (disposing)
-            {
-                this.Stop();
-                _logFactoryAdapter?.Dispose();
-            }
+            this.Stop();
+            _logFactoryAdapter?.Dispose();
             _disposed = true;
         }
     }
