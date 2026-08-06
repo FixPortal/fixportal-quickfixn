@@ -1,8 +1,10 @@
 using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Net;
 using System.Net.Security;
 using System.Net.Sockets;
+using System.Reflection;
 using System.Security.Cryptography;
 using System.Security.Cryptography.X509Certificates;
 using System.Text;
@@ -19,6 +21,57 @@ namespace UnitTests;
 [TestFixture]
 public class SocketInitiatorLifecycleTests
 {
+    private sealed class GatedConnectionTypeComparer : IEqualityComparer<string>
+    {
+        private readonly ManualResetEventSlim _admissionEntered;
+        private readonly ManualResetEventSlim _releaseAdmission;
+        private readonly SessionSettings _settings;
+        private readonly SessionID _sessionId;
+        private int _addThreadId;
+        private int _admissionGated;
+
+        public GatedConnectionTypeComparer(
+            SessionSettings settings,
+            SessionID sessionId,
+            ManualResetEventSlim admissionEntered,
+            ManualResetEventSlim releaseAdmission)
+        {
+            _settings = settings;
+            _sessionId = sessionId;
+            _admissionEntered = admissionEntered;
+            _releaseAdmission = releaseAdmission;
+        }
+
+        public void GateAdmissionOnCurrentThread()
+        {
+            _addThreadId = Environment.CurrentManagedThreadId;
+            _admissionGated = 0;
+        }
+
+        public bool Equals(string? x, string? y) => StringComparer.Ordinal.Equals(x, y);
+
+        public int GetHashCode(string key)
+        {
+            if (Environment.CurrentManagedThreadId == Volatile.Read(ref _addThreadId)
+                && key == "CONNECTIONTYPE"
+                && _settings.Has(_sessionId)
+                && Interlocked.Exchange(ref _admissionGated, 1) == 0)
+            {
+                _admissionEntered.Set();
+                _releaseAdmission.Wait();
+            }
+
+            return StringComparer.Ordinal.GetHashCode(key);
+        }
+    }
+
+    private static void SetComparer(SettingsDictionary settings, IEqualityComparer<string> comparer)
+    {
+        FieldInfo dataField = typeof(SettingsDictionary).GetField("_data", BindingFlags.Instance | BindingFlags.NonPublic)!;
+        var data = (Dictionary<string, string>)dataField.GetValue(settings)!;
+        dataField.SetValue(settings, new Dictionary<string, string>(data, comparer));
+    }
+
     private sealed class RecordingStream : Stream
     {
         private readonly ManualResetEventSlim? _disposed;
@@ -353,7 +406,11 @@ public class SocketInitiatorLifecycleTests
 
         protected override void DoConnect(Session session, SettingsDictionary settings)
         {
+            Interlocked.Increment(ref ConnectionAttempts);
         }
+
+        public int ConnectionAttempts;
+        public void ConnectForTest(SessionID sessionId) => Connect(sessionId);
 
         protected override void OnRemove(SessionID sessionId)
         {
@@ -724,45 +781,60 @@ public class SocketInitiatorLifecycleTests
     }
 
     [Test]
-    public void MissingRemovalReservesSameIdUntilTransportCleanupCompletes()
+    public void MissingRemovalCleanupCannotDeleteAcceptedReplacementSettings()
     {
         using var removeEntered = new ManualResetEventSlim();
         using var releaseRemove = new ManualResetEventSlim();
+        using var admissionEntered = new ManualResetEventSlim();
+        using var releaseAdmission = new ManualResetEventSlim();
         SessionSettings settings = InitiatorSettings();
         var replacementId = new SessionID("FIX.4.2", "REPLACEMENT_SENDER", "REPLACEMENT_TARGET");
         var initiator = new GatedMissingRemovalSocketInitiator(
             settings, replacementId, removeEntered, releaseRemove);
+        SettingsDictionary replacementSettings = InitiatorSettings().Get(
+            new SessionID("FIX.4.2", "INIT_SENDER", "INIT_TARGET"));
+        var connectionTypeComparer = new GatedConnectionTypeComparer(
+            settings, replacementId, admissionEntered, releaseAdmission);
+        SetComparer(replacementSettings, connectionTypeComparer);
         Thread? remover = null;
-        bool removed = false;
+        Thread? adder = null;
+        bool added = false;
 
         try
         {
-            initiator.Start();
-            remover = new Thread(() =>
-                removed = initiator.RemoveSession(replacementId, terminateActiveSession: true));
+            remover = new Thread(() => initiator.RemoveSession(replacementId, terminateActiveSession: true));
             remover.Start();
             Assert.That(removeEntered.Wait(5000), Is.True,
-                "missing-session removal should reach its transport cleanup boundary");
+                "missing-session removal should reserve the ID before replacement admission");
 
-            SettingsDictionary replacementSettings = InitiatorSettings().Get(
-                new SessionID("FIX.4.2", "INIT_SENDER", "INIT_TARGET"));
-            Assert.That(initiator.AddSession(replacementId, replacementSettings), Is.False,
-                "same-ID add must wait for missing-session cleanup to finish");
+            adder = new Thread(() =>
+            {
+                connectionTypeComparer.GateAdmissionOnCurrentThread();
+                added = initiator.AddSession(replacementId, replacementSettings);
+            });
+            adder.Start();
+            Assert.That(admissionEntered.Wait(5000), Is.True,
+                "replacement settings should be inserted before admission checks the removal reservation");
+            Assert.That(settings.Has(replacementId), Is.True);
 
             releaseRemove.Set();
-            Assert.That(remover.Join(5000), Is.True);
-            Assert.That(removed, Is.True);
-            Assert.That(initiator.AddSession(replacementId, replacementSettings), Is.True);
+            Assert.That(remover.Join(5000), Is.True,
+                "missing-session cleanup should finish before replacement admission resumes");
+            releaseAdmission.Set();
+            Assert.That(adder.Join(5000), Is.True);
 
+            Assert.That(added, Is.True);
             Assert.That(settings.Has(replacementId), Is.True,
-                "a stale removal must not delete a concurrently added generation's settings");
-            Assert.That(Session.LookupSession(replacementId), Is.Not.Null,
-                "the replacement session should remain globally registered");
+                "accepted replacement settings must not be deleted by stale removal cleanup");
+            Assert.DoesNotThrow(() => initiator.ConnectForTest(replacementId));
+            Assert.That(Volatile.Read(ref initiator.ConnectionAttempts), Is.EqualTo(1));
         }
         finally
         {
             releaseRemove.Set();
+            releaseAdmission.Set();
             remover?.Join(5000);
+            adder?.Join(5000);
             initiator.Dispose();
         }
     }
