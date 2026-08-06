@@ -81,8 +81,17 @@ public class SocketInitiatorThread : IResponder
                 throw new OperationCanceledException("Connection setup was cancelled");
             }
             _stream = stream;
+            try
+            {
+                Session.SetResponder(this);
+            }
+            catch
+            {
+                _stream = null;
+                stream.Dispose();
+                throw;
+            }
         }
-        Session.SetResponder(this);
     }
 
     /// <summary>
