@@ -25,7 +25,7 @@ public class SocketInitiator : AbstractInitiator
     private readonly object _sync = new();
     // FP Enhancement: 2026-08-06 — wake the worker for dynamic sessions while preserving established retry pacing.
     private readonly object _connectRequestSync = new();
-    private readonly Queue<SessionID> _connectRequests = new();
+    private readonly HashSet<SessionID> _connectRequests = [];
     private readonly ILogger _nonSessionLog;
 
     public SocketInitiator(
@@ -111,23 +111,21 @@ public class SocketInitiator : AbstractInitiator
         RemoveThread(thread.Session.SessionID);
     }
 
+    // FP Enhancement: 2026-08-06 — detach socket workers under lock and join them after releasing it.
     private void RemoveThread(SessionID sessionId)
     {
-        // We can come in here on the thread being removed, and on another thread too in the case
-        // of dynamic session removal, so make sure we won't deadlock...
-        if (Monitor.TryEnter(_sync))
+        SocketInitiatorThread? thread;
+        lock (_sync)
         {
-            if (_threads.TryGetValue(sessionId, out var thread))
-            {
-                try
-                {
-                    thread.Join();
-                }
-                catch { }
-                _threads.Remove(sessionId);
-            }
-            Monitor.Exit(_sync);
+            if (!_threads.Remove(sessionId, out thread))
+                return;
         }
+
+        try
+        {
+            thread.Join();
+        }
+        catch { }
     }
 
     private IPEndPoint GetNextSocketEndPoint(SessionID sessionId, SettingsDictionary settings)
@@ -173,6 +171,9 @@ public class SocketInitiator : AbstractInitiator
     /// <param name="settings"></param>
     protected override void OnConfigure(SessionSettings settings)
     {
+        lock (_connectRequestSync)
+            _shutdownRequested = false;
+
         try
         {
             _reconnectInterval = Convert.ToInt32(settings.Get().GetLong(SessionSettings.RECONNECT_INTERVAL));
@@ -186,43 +187,40 @@ public class SocketInitiator : AbstractInitiator
 
     protected override void OnStart()
     {
-        _shutdownRequested = false;
-
-        while(!_shutdownRequested)
+        while (true)
         {
             try
             {
-                while (true)
+                // Lock order: admission monitor, AbstractInitiator session lock (inside Connect),
+                // then this transport's thread lock (inside AddThread).
+                lock (_connectRequestSync)
                 {
-                    SessionID sessionId;
-                    lock (_connectRequestSync)
+                    if (_shutdownRequested)
+                        return;
+
+                    while (_connectRequests.Count > 0)
                     {
-                        if (_connectRequests.Count == 0)
-                            break;
-                        sessionId = _connectRequests.Dequeue();
+                        SessionID sessionId = _connectRequests.First();
+                        _connectRequests.Remove(sessionId);
+                        Connect(sessionId);
                     }
 
-                    Connect(sessionId);
-                }
+                    double reconnectIntervalAsMilliseconds = 1000.0 * _reconnectInterval;
+                    DateTime nowDt = DateTime.UtcNow;
 
-                double reconnectIntervalAsMilliseconds = 1000.0 * _reconnectInterval;
-                DateTime nowDt = DateTime.UtcNow;
+                    if (nowDt.Subtract(_lastConnectTimeDt).TotalMilliseconds >= reconnectIntervalAsMilliseconds)
+                    {
+                        Connect();
+                        _lastConnectTimeDt = nowDt;
+                    }
 
-                if (nowDt.Subtract(_lastConnectTimeDt).TotalMilliseconds >= reconnectIntervalAsMilliseconds)
-                {
-                    Connect();
-                    _lastConnectTimeDt = nowDt;
+                    if (!_shutdownRequested && _connectRequests.Count == 0)
+                        Monitor.Wait(_connectRequestSync, 1000);
                 }
             }
             catch (Exception e)
             {
                 _nonSessionLog.Log(LogLevel.Error, e, "Failed to start: {Message}", e.Message);
-            }
-
-            lock (_connectRequestSync)
-            {
-                if (!_shutdownRequested && _connectRequests.Count == 0)
-                    Monitor.Wait(_connectRequestSync, 1000);
             }
         }
     }
@@ -231,7 +229,7 @@ public class SocketInitiator : AbstractInitiator
     {
         lock (_connectRequestSync)
         {
-            _connectRequests.Enqueue(sessionId);
+            _connectRequests.Add(sessionId);
             Monitor.Pulse(_connectRequestSync);
         }
     }
@@ -242,6 +240,8 @@ public class SocketInitiator : AbstractInitiator
     /// <param name="sessionId">ID of session being removed</param>
     protected override void OnRemove(SessionID sessionId)
     {
+        lock (_connectRequestSync)
+            _connectRequests.Remove(sessionId);
         RemoveThread(sessionId);
     }
 
@@ -252,9 +252,26 @@ public class SocketInitiator : AbstractInitiator
 
     protected override void OnStop()
     {
-        _shutdownRequested = true;
+        List<SocketInitiatorThread> threads;
         lock (_connectRequestSync)
+        {
+            _shutdownRequested = true;
+            lock (_sync)
+            {
+                threads = [.. _threads.Values];
+                _threads.Clear();
+            }
             Monitor.PulseAll(_connectRequestSync);
+        }
+
+        foreach (SocketInitiatorThread thread in threads)
+        {
+            try
+            {
+                thread.Join();
+            }
+            catch { }
+        }
     }
 
     protected override void DoConnect(Session session, SettingsDictionary settings)
