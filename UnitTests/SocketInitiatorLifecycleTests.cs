@@ -307,6 +307,124 @@ public class SocketInitiatorLifecycleTests
         public void RequestWorkerStop() => base.OnStop();
     }
 
+    private sealed class BlockedSchedulingSocketInitiator : SocketInitiator
+    {
+        private readonly ManualResetEventSlim _connectEntered;
+        private readonly ManualResetEventSlim _releaseConnect;
+
+        public BlockedSchedulingSocketInitiator(
+            SessionSettings settings,
+            ManualResetEventSlim connectEntered,
+            ManualResetEventSlim releaseConnect)
+            : base(new SessionTestSupport.MockApplication(), new MemoryStoreFactory(), settings,
+                (ILogFactory?)new NullLogFactory())
+        {
+            _connectEntered = connectEntered;
+            _releaseConnect = releaseConnect;
+        }
+
+        protected override void DoConnect(Session session, SettingsDictionary settings)
+        {
+            _connectEntered.Set();
+            _releaseConnect.Wait();
+        }
+
+        public void RequestWorkerStop() => base.OnStop();
+    }
+
+    private sealed class GatedMissingRemovalSocketInitiator : SocketInitiator
+    {
+        private readonly SessionID _gatedSessionId;
+        private readonly ManualResetEventSlim _removeEntered;
+        private readonly ManualResetEventSlim _releaseRemove;
+
+        public GatedMissingRemovalSocketInitiator(
+            SessionSettings settings,
+            SessionID gatedSessionId,
+            ManualResetEventSlim removeEntered,
+            ManualResetEventSlim releaseRemove)
+            : base(new SessionTestSupport.MockApplication(), new MemoryStoreFactory(), settings,
+                (ILogFactory?)new NullLogFactory())
+        {
+            _gatedSessionId = gatedSessionId;
+            _removeEntered = removeEntered;
+            _releaseRemove = releaseRemove;
+        }
+
+        protected override void DoConnect(Session session, SettingsDictionary settings)
+        {
+        }
+
+        protected override void OnRemove(SessionID sessionId)
+        {
+            if (sessionId.Equals(_gatedSessionId))
+            {
+                _removeEntered.Set();
+                _releaseRemove.Wait();
+            }
+            base.OnRemove(sessionId);
+        }
+    }
+
+    private sealed class ConcurrentStopSocketInitiator : SocketInitiator
+    {
+        private readonly ManualResetEventSlim _configureEntered;
+        private readonly ManualResetEventSlim _releaseConfigure;
+        private readonly ManualResetEventSlim _firstStopPaused;
+        private readonly ManualResetEventSlim _releaseFirstStop;
+        private int _configureCalls;
+        private int _stopCalls;
+
+        public ConcurrentStopSocketInitiator(
+            SessionSettings settings,
+            ManualResetEventSlim configureEntered,
+            ManualResetEventSlim releaseConfigure,
+            ManualResetEventSlim firstStopPaused,
+            ManualResetEventSlim releaseFirstStop)
+            : base(new SessionTestSupport.MockApplication(), new MemoryStoreFactory(), settings,
+                (ILogFactory?)new NullLogFactory())
+        {
+            _configureEntered = configureEntered;
+            _releaseConfigure = releaseConfigure;
+            _firstStopPaused = firstStopPaused;
+            _releaseFirstStop = releaseFirstStop;
+        }
+
+        public ManualResetEventSlim SecondStopEntered { get; } = new();
+        public int WorkerStarts;
+
+        protected override void OnConfigure(SessionSettings settings)
+        {
+            if (Interlocked.Increment(ref _configureCalls) == 1)
+            {
+                _configureEntered.Set();
+                _releaseConfigure.Wait();
+            }
+            base.OnConfigure(settings);
+        }
+
+        protected override void OnStart() => Interlocked.Increment(ref WorkerStarts);
+
+        protected override void OnStop()
+        {
+            int stopCall = Interlocked.Increment(ref _stopCalls);
+            base.OnStop();
+            if (stopCall == 1)
+            {
+                _firstStopPaused.Set();
+                _releaseFirstStop.Wait();
+            }
+            else
+            {
+                SecondStopEntered.Set();
+            }
+        }
+
+        protected override void DoConnect(Session session, SettingsDictionary settings)
+        {
+        }
+    }
+
     private static SessionSettings InitiatorSettings(int port = 65530, bool useSsl = false)
     {
         var session = new SettingsDictionary();
@@ -450,8 +568,10 @@ public class SocketInitiatorLifecycleTests
             Assert.That(disposeEntered.Wait(5000), Is.True,
                 "old session disposal should begin after transport cleanup");
 
+            Assert.That(initiator.RemoveSession(sessionId, terminateActiveSession: true), Is.True,
+                "a duplicate removal should be idempotent while disposal is in progress");
             Assert.That(initiator.AddSession(sessionId, sessionSettings), Is.False,
-                "same-ID re-add must wait for old session disposal");
+                "duplicate removal must not release the same-ID reservation before old disposal");
 
             releaseDispose.Set();
             Assert.That(remover.Join(5000), Is.True, "session removal should complete after disposal is released");
@@ -567,6 +687,151 @@ public class SocketInitiatorLifecycleTests
             initiator.RequestWorkerStop();
             workerExited.Wait(5000);
             stopper?.Join(5000);
+        }
+    }
+
+    [Test]
+    public void ShutdownSignalDoesNotWaitForBlockedConnectScheduling()
+    {
+        using var connectEntered = new ManualResetEventSlim();
+        using var releaseConnect = new ManualResetEventSlim();
+        using var stopCompleted = new ManualResetEventSlim();
+        using var initiator = new BlockedSchedulingSocketInitiator(
+            InitiatorSettings(), connectEntered, releaseConnect);
+        Thread? stopper = null;
+
+        try
+        {
+            initiator.Start();
+            Assert.That(connectEntered.Wait(5000), Is.True,
+                "the worker should enter connection scheduling");
+
+            stopper = new Thread(() =>
+            {
+                initiator.RequestWorkerStop();
+                stopCompleted.Set();
+            });
+            stopper.Start();
+
+            Assert.That(stopCompleted.Wait(5000), Is.True,
+                "shutdown signalling must not wait for synchronous connection setup");
+        }
+        finally
+        {
+            releaseConnect.Set();
+            stopper?.Join(5000);
+        }
+    }
+
+    [Test]
+    public void MissingRemovalReservesSameIdUntilTransportCleanupCompletes()
+    {
+        using var removeEntered = new ManualResetEventSlim();
+        using var releaseRemove = new ManualResetEventSlim();
+        SessionSettings settings = InitiatorSettings();
+        var replacementId = new SessionID("FIX.4.2", "REPLACEMENT_SENDER", "REPLACEMENT_TARGET");
+        var initiator = new GatedMissingRemovalSocketInitiator(
+            settings, replacementId, removeEntered, releaseRemove);
+        Thread? remover = null;
+        bool removed = false;
+
+        try
+        {
+            initiator.Start();
+            remover = new Thread(() =>
+                removed = initiator.RemoveSession(replacementId, terminateActiveSession: true));
+            remover.Start();
+            Assert.That(removeEntered.Wait(5000), Is.True,
+                "missing-session removal should reach its transport cleanup boundary");
+
+            SettingsDictionary replacementSettings = InitiatorSettings().Get(
+                new SessionID("FIX.4.2", "INIT_SENDER", "INIT_TARGET"));
+            Assert.That(initiator.AddSession(replacementId, replacementSettings), Is.False,
+                "same-ID add must wait for missing-session cleanup to finish");
+
+            releaseRemove.Set();
+            Assert.That(remover.Join(5000), Is.True);
+            Assert.That(removed, Is.True);
+            Assert.That(initiator.AddSession(replacementId, replacementSettings), Is.True);
+
+            Assert.That(settings.Has(replacementId), Is.True,
+                "a stale removal must not delete a concurrently added generation's settings");
+            Assert.That(Session.LookupSession(replacementId), Is.Not.Null,
+                "the replacement session should remain globally registered");
+        }
+        finally
+        {
+            releaseRemove.Set();
+            remover?.Join(5000);
+            initiator.Dispose();
+        }
+    }
+
+    [Test]
+    public void ConcurrentStopsAreSerializedBeforeRestart()
+    {
+        using var configureEntered = new ManualResetEventSlim();
+        using var releaseConfigure = new ManualResetEventSlim();
+        using var firstStopPaused = new ManualResetEventSlim();
+        using var releaseFirstStop = new ManualResetEventSlim();
+        using var initiator = new ConcurrentStopSocketInitiator(
+            InitiatorSettings(), configureEntered, releaseConfigure, firstStopPaused, releaseFirstStop);
+        Thread? starter = null;
+        Thread? firstStopper = null;
+        Thread? secondStopper = null;
+
+        try
+        {
+            starter = new Thread(initiator.Start);
+            starter.Start();
+            Assert.That(configureEntered.Wait(5000), Is.True,
+                "start should hold its lifecycle boundary while configuring");
+
+            firstStopper = new Thread(() =>
+            {
+                initiator.Stop(force: true);
+            });
+            secondStopper = new Thread(() =>
+            {
+                initiator.Stop(force: true);
+            });
+            firstStopper.Start();
+            secondStopper.Start();
+            Assert.That(SpinWait.SpinUntil(
+                    () => firstStopper.ThreadState.HasFlag(ThreadState.WaitSleepJoin)
+                          && secondStopper.ThreadState.HasFlag(ThreadState.WaitSleepJoin),
+                    5000),
+                Is.True, "both stop callers should be queued behind initial configuration");
+
+            releaseConfigure.Set();
+            Assert.That(starter.Join(5000), Is.True);
+            Assert.That(firstStopPaused.Wait(5000), Is.True,
+                "the first stop should pause before completing its lifecycle");
+            Assert.That(initiator.SecondStopEntered.Wait(250), Is.False,
+                "a concurrent stop must not enter lifecycle cleanup before the first stop completes");
+
+            initiator.Start();
+            Assert.That(Volatile.Read(ref initiator.WorkerStarts), Is.EqualTo(1),
+                "restart must be refused while any stop lifecycle is still active");
+
+            releaseFirstStop.Set();
+            Assert.That(firstStopper.Join(5000), Is.True);
+            Assert.That(secondStopper.Join(5000), Is.True);
+
+            initiator.Start();
+            Assert.That(SpinWait.SpinUntil(
+                    () => Volatile.Read(ref initiator.WorkerStarts) == 2, 5000),
+                Is.True, "restart should launch a replacement worker");
+            Assert.That(initiator.GetSessionIDs(), Is.Not.Empty,
+                "the completed stop must not clear the restarted generation");
+        }
+        finally
+        {
+            releaseConfigure.Set();
+            releaseFirstStop.Set();
+            starter?.Join(5000);
+            firstStopper?.Join(5000);
+            secondStopper?.Join(5000);
         }
     }
 }
