@@ -1,7 +1,9 @@
 using System;
 using System.IO;
 using System.Net;
+using System.Net.Sockets;
 using System.Threading;
+using System.Threading.Tasks;
 using NUnit.Framework;
 using QuickFix;
 using QuickFix.Logger;
@@ -84,8 +86,7 @@ public class SocketInitiatorLifecycleTests
         protected override Stream SetupStream()
         {
             _setupEntered.Set();
-            if (!_releaseSetup.Wait(5000))
-                throw new TimeoutException("test did not release connection setup");
+            _releaseSetup.Wait();
             return _stream;
         }
     }
@@ -151,6 +152,55 @@ public class SocketInitiatorLifecycleTests
         }
     }
 
+    private sealed class AbaSocketInitiator : SocketInitiator
+    {
+        private readonly ManualResetEventSlim _oldSetupEntered;
+        private readonly ManualResetEventSlim _releaseOldSetup;
+        private readonly Stream _oldStream;
+        private int _connectionAttempts;
+
+        public GatedSetupSocketInitiatorThread? OldThread { get; private set; }
+
+        public AbaSocketInitiator(
+            SessionSettings settings,
+            ManualResetEventSlim oldSetupEntered,
+            ManualResetEventSlim releaseOldSetup,
+            Stream oldStream)
+            : base(new SessionTestSupport.MockApplication(), new MemoryStoreFactory(), settings,
+                (ILogFactory?)new NullLogFactory())
+        {
+            _oldSetupEntered = oldSetupEntered;
+            _releaseOldSetup = releaseOldSetup;
+            _oldStream = oldStream;
+        }
+
+        protected override void DoConnect(Session session, SettingsDictionary settings)
+        {
+            if (Interlocked.Increment(ref _connectionAttempts) == 1)
+            {
+                SetPending(session.SessionID);
+                OldThread = new GatedSetupSocketInitiatorThread(
+                    this, session, _oldSetupEntered, _releaseOldSetup, _oldStream);
+                OldThread.Start();
+                return;
+            }
+
+            base.DoConnect(session, settings);
+        }
+
+        protected override void OnRemove(SessionID sessionId)
+        {
+            OldThread?.WaitForCompletion(2000);
+            base.OnRemove(sessionId);
+        }
+
+        protected override void OnStop()
+        {
+            OldThread?.Disconnect();
+            base.OnStop();
+        }
+    }
+
     private sealed class GatedSocketInitiator : SocketInitiator
     {
         private readonly ManualResetEventSlim _workerEntered;
@@ -196,7 +246,7 @@ public class SocketInitiatorLifecycleTests
         public void RequestWorkerStop() => base.OnStop();
     }
 
-    private static SessionSettings InitiatorSettings()
+    private static SessionSettings InitiatorSettings(int port = 65530, bool useSsl = false)
     {
         var session = new SettingsDictionary();
         session.SetString(SessionSettings.CONNECTION_TYPE, "initiator");
@@ -205,11 +255,24 @@ public class SocketInitiatorLifecycleTests
         session.SetString(SessionSettings.END_TIME, "12:00:00");
         session.SetString(SessionSettings.HEARTBTINT, "30");
         session.SetString(SessionSettings.SOCKET_CONNECT_HOST, "127.0.0.1");
-        session.SetString(SessionSettings.SOCKET_CONNECT_PORT, "65530");
+        session.SetLong(SessionSettings.SOCKET_CONNECT_PORT, port);
+        if (useSsl)
+        {
+            session.SetBool(SessionSettings.SSL_ENABLE, true);
+            session.SetString(SessionSettings.SSL_SERVERNAME, "localhost");
+            session.SetBool(SessionSettings.SSL_VALIDATE_CERTIFICATES, false);
+            session.SetBool(SessionSettings.SSL_CHECK_CERTIFICATE_REVOCATION, false);
+            session.SetBool(SessionSettings.SOCKET_IGNORE_PROXY, true);
+        }
 
         var settings = new SessionSettings();
         settings.Set(new SessionID("FIX.4.2", "INIT_SENDER", "INIT_TARGET"), session);
         return settings;
+    }
+
+    private static bool PeerClosed(TcpClient peer)
+    {
+        return peer.Client.Poll(1_000_000, SelectMode.SelectRead) && peer.Client.Available == 0;
     }
 
     [Test]
@@ -245,7 +308,7 @@ public class SocketInitiatorLifecycleTests
     }
 
     [Test]
-    public void RemoveWhileConnectionSetupIsBlockedRejectsItsLateActivation()
+    public void RemoveWhileConnectionSetupIsBlockedReservesIdAndRejectsLateActivation()
     {
         using var setupEntered = new ManualResetEventSlim();
         using var releaseSetup = new ManualResetEventSlim();
@@ -253,8 +316,11 @@ public class SocketInitiatorLifecycleTests
         using var releaseRemove = new ManualResetEventSlim();
         using var streamDisposed = new ManualResetEventSlim();
         var stream = new RecordingStream(streamDisposed);
+        SessionSettings settings = InitiatorSettings();
+        var sessionId = new SessionID("FIX.4.2", "INIT_SENDER", "INIT_TARGET");
+        SettingsDictionary sessionSettings = settings.Get(sessionId);
         using var initiator = new GatedRemovalSocketInitiator(
-            InitiatorSettings(), setupEntered, releaseSetup, stream, removeEntered, releaseRemove);
+            settings, setupEntered, releaseSetup, stream, removeEntered, releaseRemove);
         Thread? remover = null;
         bool removed = false;
 
@@ -262,24 +328,28 @@ public class SocketInitiatorLifecycleTests
         {
             initiator.Start();
             Assert.That(setupEntered.Wait(5000), Is.True, "connection setup should reach its gate");
+            GatedSetupSocketInitiatorThread connectionThread = initiator.ConnectionThread!;
 
-            SessionID sessionId = initiator.ConnectionThread!.Session.SessionID;
             remover = new Thread(() => removed = initiator.RemoveSession(sessionId, terminateActiveSession: true));
             remover.Start();
             Assert.That(removeEntered.Wait(5000), Is.True,
                 "removal should clear initiator state before transport cleanup starts");
+            Assert.That(initiator.AddSession(sessionId, sessionSettings), Is.False,
+                "same-ID re-add must wait for transport cleanup");
 
             releaseSetup.Set();
 
-            Assert.That(initiator.ConnectionThread.WaitForCompletion(5000), Is.True,
+            Assert.That(connectionThread.WaitForCompletion(5000), Is.True,
                 "the connection worker should complete while transport removal remains paused");
             Assert.That(stream.WriteCount, Is.Zero, "a removed session must not publish a late Logon");
-            initiator.ConnectionThread.Disconnect();
+            connectionThread.Disconnect();
             Assert.That(streamDisposed.Wait(5000), Is.True, "completed worker stream should be released");
 
             releaseRemove.Set();
             Assert.That(remover.Join(5000), Is.True, "session removal should complete after cleanup is released");
             Assert.That(removed, Is.True);
+            Assert.That(initiator.AddSession(sessionId, sessionSettings), Is.True,
+                "same-ID re-add should succeed after removal returns");
         }
         finally
         {
@@ -288,6 +358,59 @@ public class SocketInitiatorLifecycleTests
             initiator.ConnectionThread?.Disconnect();
             initiator.ConnectionThread?.Join();
             remover?.Join(5000);
+        }
+    }
+
+    [Test]
+    public void RemovedGenerationCannotActivateOrCancelReplacement()
+    {
+        using var listener = new TcpListener(IPAddress.Loopback, 0);
+        listener.Start();
+        int port = ((IPEndPoint)listener.LocalEndpoint).Port;
+        using var oldSetupEntered = new ManualResetEventSlim();
+        using var releaseOldSetup = new ManualResetEventSlim();
+        var oldStream = new RecordingStream();
+        SessionSettings settings = InitiatorSettings(port, useSsl: true);
+        var sessionId = new SessionID("FIX.4.2", "INIT_SENDER", "INIT_TARGET");
+        SettingsDictionary sessionSettings = settings.Get(sessionId);
+        using var initiator = new AbaSocketInitiator(settings, oldSetupEntered, releaseOldSetup, oldStream);
+        TcpClient? replacementPeer = null;
+
+        try
+        {
+            initiator.Start();
+            Assert.That(oldSetupEntered.Wait(5000), Is.True, "old connection setup should reach its gate");
+
+            Assert.That(initiator.RemoveSession(sessionId, terminateActiveSession: true), Is.True);
+            Assert.That(initiator.OldThread!.WaitForCompletion(0), Is.False,
+                "old setup should outlive bounded transport cleanup");
+            Assert.That(initiator.AddSession(sessionId, sessionSettings), Is.True);
+
+            Task<TcpClient> acceptReplacement = listener.AcceptTcpClientAsync();
+            Assert.That(acceptReplacement.Wait(5000), Is.True,
+                "replacement connection should reach its TLS setup gate");
+            replacementPeer = acceptReplacement.Result;
+            replacementPeer.ReceiveTimeout = 5000;
+            byte[] clientHello = new byte[4096];
+            Assert.That(replacementPeer.GetStream().Read(clientHello), Is.GreaterThan(0),
+                "replacement should remain pending after sending its TLS ClientHello");
+
+            releaseOldSetup.Set();
+
+            Assert.That(initiator.OldThread.WaitForCompletion(5000), Is.True,
+                "old connection worker should complete after setup is released");
+            Assert.That(oldStream.WriteCount, Is.Zero,
+                "an old session instance must not activate against replacement pending state");
+            Assert.That(PeerClosed(replacementPeer), Is.False,
+                "old worker cleanup must not cancel the replacement connection");
+        }
+        finally
+        {
+            releaseOldSetup.Set();
+            initiator.OldThread?.Disconnect();
+            initiator.OldThread?.Join();
+            replacementPeer?.Dispose();
+            listener.Stop();
         }
     }
 

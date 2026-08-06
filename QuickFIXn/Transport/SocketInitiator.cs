@@ -98,7 +98,7 @@ public class SocketInitiator : AbstractInitiator
         // Lock order: admission monitor, then AbstractInitiator state/session.
         lock (_connectRequestSync)
         {
-            if (_shutdownRequested || !IsPending(thread.Session.SessionID))
+            if (_shutdownRequested || !IsPending(thread.Session))
                 return false;
 
             SetConnected(thread.Session.SessionID);
@@ -128,7 +128,20 @@ public class SocketInitiator : AbstractInitiator
 
     private void RemoveThread(SocketInitiatorThread thread)
     {
-        RemoveThread(thread.Session.SessionID);
+        // FP Enhancement: 2026-08-06 — a stale worker must not detach a newer same-ID generation.
+        lock (_sync)
+        {
+            if (!_threads.TryGetValue(thread.Session.SessionID, out SocketInitiatorThread? registeredThread)
+                || !ReferenceEquals(registeredThread, thread))
+                return;
+            _threads.Remove(thread.Session.SessionID);
+        }
+
+        try
+        {
+            thread.Join();
+        }
+        catch { }
     }
 
     // FP Enhancement: 2026-08-06 — detach socket workers under lock and join them after releasing it.
