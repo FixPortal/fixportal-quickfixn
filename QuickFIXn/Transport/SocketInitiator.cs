@@ -4,6 +4,7 @@ using System.IO;
 using System.Linq;
 using System.Net;
 using System.Net.Sockets;
+using System.Runtime.ExceptionServices;
 using System.Threading;
 using Microsoft.Extensions.Logging;
 using QuickFix.Logger;
@@ -59,46 +60,58 @@ public class SocketInitiator : AbstractInitiator
         SocketInitiatorThread? t = socketInitiatorThread as SocketInitiatorThread;
         if (t == null) return;
 
+        // FP Enhancement: 2026-08-06 — always publish reader exit, preserving the first failure
+        // while each cleanup step gets one independent attempt.
+        Exception? failure = null;
         try
         {
-            t.Connect();
-            if (t.Initiator.TryActivate(t))
+            try
             {
-                while (t.Read()) {
-                    // Read dispatches each complete message and returns whether the stream remains open.
+                t.Connect();
+                if (t.Initiator.TryActivate(t))
+                {
+                    while (t.Read()) {
+                        // Read dispatches each complete message and returns whether the stream remains open.
+                    }
                 }
             }
-        }
-        catch (OperationCanceledException)
-        {
-            // Expected when shutdown interrupts connection setup.
-        }
-        catch (IOException ex) // Can be exception when connecting, during ssl authentication or when reading
-        {
-            LogThreadStartConnectionFailed(t, ex);
-        }
-        catch (SocketException ex)
-        {
-            LogThreadStartConnectionFailed(t, ex);
-        }
-        catch (System.Security.Authentication.AuthenticationException ex) // some certificate problems
-        {
-            LogThreadStartConnectionFailed(t, ex);
+            catch (OperationCanceledException)
+            {
+                // Expected when shutdown interrupts connection setup.
+            }
+            catch (IOException ex) // Can be exception when connecting, during ssl authentication or when reading
+            {
+                LogThreadStartConnectionFailed(t, ex);
+            }
+            catch (SocketException ex)
+            {
+                LogThreadStartConnectionFailed(t, ex);
+            }
+            catch (System.Security.Authentication.AuthenticationException ex) // some certificate problems
+            {
+                LogThreadStartConnectionFailed(t, ex);
+            }
+            catch (Exception ex)
+            {
+                LogThreadStartConnectionFailed(t, ex);
+            }
         }
         catch (Exception ex)
         {
-            LogThreadStartConnectionFailed(t, ex);
-        }
-
-        try
-        {
-            t.Initiator.RemoveThread(t);
-            t.Initiator.SetDisconnected(t.Session);
+            failure = ex;
         }
         finally
         {
-            t.SignalExited();
+            try { t.Initiator.RemoveThread(t); }
+            catch (Exception ex) { failure ??= ex; }
+            try { t.Initiator.SetDisconnected(t.Session); }
+            catch (Exception ex) { failure ??= ex; }
+            try { t.SignalExited(); }
+            catch (Exception ex) { failure ??= ex; }
         }
+
+        if (failure is not null)
+            ExceptionDispatchInfo.Capture(failure).Throw();
     }
 
     // FP Enhancement: 2026-08-06 — make connection activation atomic with initiator shutdown.
