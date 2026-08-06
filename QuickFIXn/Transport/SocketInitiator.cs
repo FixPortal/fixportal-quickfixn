@@ -26,6 +26,7 @@ public class SocketInitiator : AbstractInitiator
     // FP Enhancement: 2026-08-06 — wake the worker for dynamic sessions while preserving established retry pacing.
     private readonly object _connectRequestSync = new();
     private readonly HashSet<SessionID> _connectRequests = [];
+    private CancellationTokenSource _connectionSetupCancellation = new();
     private readonly ILogger _nonSessionLog;
 
     public SocketInitiator(
@@ -160,7 +161,8 @@ public class SocketInitiator : AbstractInitiator
         catch { }
     }
 
-    private IPEndPoint GetNextSocketEndPoint(SessionID sessionId, SettingsDictionary settings)
+    private IPEndPoint GetNextSocketEndPoint(
+        SessionID sessionId, SettingsDictionary settings, CancellationToken cancellationToken)
     {
         if (!_sessionToHostNum.TryGetValue(sessionId, out var num))
             num = 0;
@@ -177,7 +179,8 @@ public class SocketInitiator : AbstractInitiator
         try
         {
             var hostName = settings.GetString(hostKey);
-            IPAddress[] addrs = Dns.GetHostAddresses(hostName);
+            IPAddress[] addrs = Dns.GetHostAddressesAsync(hostName, cancellationToken)
+                .GetAwaiter().GetResult();
             int port = System.Convert.ToInt32(settings.GetLong(portKey));
             _sessionToHostNum[sessionId] = ++num;
 
@@ -203,8 +206,14 @@ public class SocketInitiator : AbstractInitiator
     /// <param name="settings"></param>
     protected override void OnConfigure(SessionSettings settings)
     {
+        CancellationTokenSource previousCancellation;
         lock (_connectRequestSync)
+        {
+            previousCancellation = _connectionSetupCancellation;
+            _connectionSetupCancellation = new CancellationTokenSource();
             _shutdownRequested = false;
+        }
+        previousCancellation.Dispose();
 
         try
         {
@@ -223,29 +232,38 @@ public class SocketInitiator : AbstractInitiator
         {
             try
             {
-                // Lock order: admission monitor, AbstractInitiator session lock (inside Connect),
-                // then this transport's thread lock (inside AddThread).
+                SessionID? connectRequest = null;
                 lock (_connectRequestSync)
                 {
                     if (_shutdownRequested)
                         return;
 
-                    while (_connectRequests.Count > 0)
+                    if (_connectRequests.Count > 0)
                     {
-                        SessionID sessionId = _connectRequests.First();
-                        _connectRequests.Remove(sessionId);
-                        Connect(sessionId);
+                        connectRequest = _connectRequests.First();
+                        _connectRequests.Remove(connectRequest);
                     }
+                }
 
-                    double reconnectIntervalAsMilliseconds = 1000.0 * _reconnectInterval;
-                    DateTime nowDt = DateTime.UtcNow;
+                if (connectRequest is not null)
+                    Connect(connectRequest);
 
-                    if (nowDt.Subtract(_lastConnectTimeDt).TotalMilliseconds >= reconnectIntervalAsMilliseconds)
-                    {
-                        Connect();
-                        _lastConnectTimeDt = nowDt;
-                    }
+                if (_shutdownRequested)
+                    return;
 
+                double reconnectIntervalAsMilliseconds = 1000.0 * _reconnectInterval;
+                DateTime nowDt = DateTime.UtcNow;
+
+                if (nowDt.Subtract(_lastConnectTimeDt).TotalMilliseconds >= reconnectIntervalAsMilliseconds)
+                {
+                    Connect();
+                    _lastConnectTimeDt = nowDt;
+                }
+
+                lock (_connectRequestSync)
+                {
+                    if (_shutdownRequested)
+                        return;
                     if (!_shutdownRequested && _connectRequests.Count == 0)
                         Monitor.Wait(_connectRequestSync, 1000);
                 }
@@ -285,9 +303,11 @@ public class SocketInitiator : AbstractInitiator
     protected override void OnStop()
     {
         List<SocketInitiatorThread> threads;
+        CancellationTokenSource connectionSetupCancellation;
         lock (_connectRequestSync)
         {
             _shutdownRequested = true;
+            connectionSetupCancellation = _connectionSetupCancellation;
             lock (_sync)
             {
                 threads = [.. _threads.Values];
@@ -295,6 +315,12 @@ public class SocketInitiator : AbstractInitiator
             }
             Monitor.PulseAll(_connectRequestSync);
         }
+
+        try
+        {
+            connectionSetupCancellation.Cancel();
+        }
+        catch (ObjectDisposedException) { }
 
         foreach (SocketInitiatorThread thread in threads)
         {
@@ -308,38 +334,62 @@ public class SocketInitiator : AbstractInitiator
 
     protected override void DoConnect(Session session, SettingsDictionary settings)
     {
+        CancellationToken cancellationToken;
+        lock (_connectRequestSync)
+        {
+            if (_shutdownRequested)
+                return;
+            cancellationToken = _connectionSetupCancellation.Token;
+        }
+
+        bool restoreDisconnectedOnFailure = false;
         try
         {
             if (!session.IsSessionTime)
                 return;
 
-            IPEndPoint socketEndPoint = GetNextSocketEndPoint(session.SessionID, settings);
-            SetPending(session.SessionID);
-            session.Log.Log(LogLevel.Information, "Connecting to {Address} on port {Port}",
-                socketEndPoint.Address, socketEndPoint.Port);
+            IPEndPoint socketEndPoint = GetNextSocketEndPoint(
+                session.SessionID, settings, cancellationToken);
 
             //Setup socket settings based on current section
             var socketSettings = _socketSettings.Clone();
             socketSettings.Configure(settings);
 
-            // Create a Ssl-SocketInitiatorThread if a certificate is given
-            SocketInitiatorThread t = new SocketInitiatorThread(
-                this, session, socketEndPoint, socketSettings, QfLoggerFactory);
-            AddThread(t);
-            try
+            lock (_connectRequestSync)
             {
-                t.Start();
-            }
-            catch (Exception)
-            {
-                lock (_sync)
+                if (_shutdownRequested
+                    || cancellationToken.IsCancellationRequested
+                    || !TrySetPending(session))
+                    return;
+
+                restoreDisconnectedOnFailure = true;
+                session.Log.Log(LogLevel.Information, "Connecting to {Address} on port {Port}",
+                    socketEndPoint.Address, socketEndPoint.Port);
+
+                // Create a Ssl-SocketInitiatorThread if a certificate is given
+                SocketInitiatorThread t = new SocketInitiatorThread(
+                    this, session, socketEndPoint, socketSettings, QfLoggerFactory);
+                AddThread(t);
+                try
                 {
-                    _threads.Remove(session.SessionID);
+                    t.Start();
                 }
-                throw;
+                catch
+                {
+                    RemoveThread(t);
+                    throw;
+                }
+                restoreDisconnectedOnFailure = false;
             }
         }
-        catch (Exception e) {
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            // Expected when shutdown cancels target resolution.
+        }
+        catch (Exception e)
+        {
+            if (restoreDisconnectedOnFailure)
+                SetDisconnected(session);
             session.Log.Log(LogLevel.Error, e, "Connection error: {Message}", e.Message);
         }
     }
@@ -348,7 +398,14 @@ public class SocketInitiator : AbstractInitiator
 
     protected override void Dispose(bool disposing)
     {
-        // nothing additional to do for this subclass
-        base.Dispose(disposing);
+        try
+        {
+            base.Dispose(disposing);
+        }
+        finally
+        {
+            if (disposing)
+                _connectionSetupCancellation.Dispose();
+        }
     }
 }

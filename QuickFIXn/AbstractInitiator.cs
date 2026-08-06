@@ -13,11 +13,13 @@ public abstract class AbstractInitiator : IInitiator
     private readonly SessionSettings _settings;
 
     private readonly object _sync = new();
+    private readonly object _lifecycleSync = new();
     private readonly Dictionary<SessionID, Session> _sessions = new();
     private readonly HashSet<SessionID> _sessionIDs = [];
     private readonly HashSet<SessionID> _pending = [];
     private readonly HashSet<SessionID> _connected = [];
     private readonly HashSet<SessionID> _disconnected = [];
+    private readonly HashSet<SessionID> _removing = [];
     private readonly SessionFactory _sessionFactory;
     private Thread? _thread;
 
@@ -90,35 +92,40 @@ public abstract class AbstractInitiator : IInitiator
 
     public void Start()
     {
-        if (_disposed)
-            throw new ObjectDisposedException(this.GetType().Name);
-
-        lock (_sync)
+        // FP Enhancement: 2026-08-06 — refuse restart while any stop lifecycle still owns cleanup.
+        if (!Monitor.TryEnter(_lifecycleSync))
+            return;
+        try
         {
-            // Refuse to start while ANY worker thread reference is still live. Keying only on
-            // !IsStopped left a race: a Stop() in progress sets IsStopped=true outside _sync and
-            // then blocks in Join() before nulling _thread, so a concurrent Start() would pass the
-            // old guard, flip IsStopped back to false, and spawn a second worker while the first was
-            // still being torn down. _thread is nulled only by Stop() after Join, so this is null
-            // exactly when (and only when) it is safe to start a fresh worker.
-            if (_thread is not null)
-                return;
+            if (_disposed)
+                throw new ObjectDisposedException(this.GetType().Name);
 
-            // create all sessions
-            foreach (SessionID sessionId in _settings.GetSessions())
+            lock (_settings)
             {
-                SettingsDictionary dict = _settings.Get(sessionId);
-                CreateSession(sessionId, dict);
+                lock (_sync)
+                {
+                    if (_thread is not null)
+                        return;
+
+                    foreach (SessionID sessionId in _settings.GetSessions())
+                    {
+                        SettingsDictionary dict = _settings.Get(sessionId);
+                        CreateSession(sessionId, dict);
+                    }
+
+                    if (0 == _sessions.Count)
+                        throw new ConfigError("No sessions defined for initiator");
+
+                    IsStopped = false;
+                    OnConfigure(_settings);
+                    _thread = new Thread(OnStart);
+                    _thread.Start();
+                }
             }
-
-            if (0 == _sessions.Count)
-                throw new ConfigError("No sessions defined for initiator");
-
-            // start it up
-            IsStopped = false;
-            OnConfigure(_settings);
-            _thread = new Thread(OnStart);
-            _thread.Start();
+        }
+        finally
+        {
+            Monitor.Exit(_lifecycleSync);
         }
     }
 
@@ -156,18 +163,20 @@ public abstract class AbstractInitiator : IInitiator
     /// <returns>true if session added successfully, false if session already exists or is not an initiator</returns>
     private bool CreateSession(SessionID sessionId, SettingsDictionary dict)
     {
-        if (dict.GetString(SessionSettings.CONNECTION_TYPE) == "initiator" && !_sessionIDs.Contains(sessionId))
+        if (dict.GetString(SessionSettings.CONNECTION_TYPE) != "initiator")
+            return false;
+
+        lock (_sync)
         {
+            if (_sessionIDs.Contains(sessionId) || _removing.Contains(sessionId))
+                return false;
+
             Session session = _sessionFactory.Create(sessionId, dict);
-            lock (_sync)
-            {
-                _sessionIDs.Add(sessionId);
-                _sessions[sessionId] = session;
-                SetDisconnected(sessionId);
-            }
+            _sessionIDs.Add(sessionId);
+            _sessions[sessionId] = session;
+            SetDisconnected(sessionId);
             return true;
         }
-        return false;
     }
 
     /// <summary>
@@ -180,19 +189,26 @@ public abstract class AbstractInitiator : IInitiator
     {
         Session? session = null;
         bool disconnectRequired = false;
-        lock (_sync)
+        lock (_settings)
         {
-            if (_sessionIDs.Contains(sessionId))
+            lock (_sync)
             {
-                session = _sessions[sessionId];
-                if (session.IsLoggedOn && !terminateActiveSession)
-                    return false;
-                _sessions.Remove(sessionId);
-                disconnectRequired = IsConnected(sessionId) || IsPending(sessionId);
-                if (disconnectRequired)
-                    SetDisconnected(sessionId);
-                _disconnected.Remove(sessionId);
-                _sessionIDs.Remove(sessionId);
+                if (_removing.Contains(sessionId))
+                    return true;
+
+                if (_sessionIDs.Contains(sessionId))
+                {
+                    session = _sessions[sessionId];
+                    if (session.IsLoggedOn && !terminateActiveSession)
+                        return false;
+                    _sessions.Remove(sessionId);
+                    disconnectRequired = IsConnected(sessionId) || IsPending(sessionId);
+                    if (disconnectRequired)
+                        SetDisconnected(sessionId);
+                    _disconnected.Remove(sessionId);
+                    _sessionIDs.Remove(sessionId);
+                }
+                _removing.Add(sessionId);
             }
         }
         if (disconnectRequired)
@@ -201,7 +217,13 @@ public abstract class AbstractInitiator : IInitiator
         session?.Dispose();
         // FP Enhancement: 2026-08-06 — reserve the session ID until old-session disposal completes.
         lock (_settings)
-            _settings.Remove(sessionId);
+        {
+            lock (_sync)
+            {
+                _settings.Remove(sessionId);
+                _removing.Remove(sessionId);
+            }
+        }
 
         return true;
     }
@@ -220,66 +242,63 @@ public abstract class AbstractInitiator : IInitiator
     /// <param name="force">If true, terminate immediately.  </param>
     public void Stop(bool force)
     {
-        if (_disposed)
-            throw new ObjectDisposedException(this.GetType().Name);
-
-        if (IsStopped)
-            return;
-
-        lock (_sync)
+        lock (_lifecycleSync)
         {
-            foreach (SessionID sessionId in _connected)
+            if (_disposed)
+                throw new ObjectDisposedException(this.GetType().Name);
+
+            if (IsStopped)
+                return;
+
+            lock (_sync)
             {
-                Session? session = Session.LookupSession(sessionId);
-                if (session is not null && session.IsEnabled)
+                foreach (SessionID sessionId in _connected)
                 {
-                    session.Logout();
+                    Session? session = Session.LookupSession(sessionId);
+                    if (session is not null && session.IsEnabled)
+                    {
+                        session.Logout();
+                    }
                 }
             }
-        }
 
-        if (!force)
-        {
-            // TODO change this duration to always exceed LogoutTimeout setting
-            for (int second = 0; (second < 10) && IsLoggedOn; ++second)
-                Thread.Sleep(1000);
-        }
+            if (!force)
+            {
+                // TODO change this duration to always exceed LogoutTimeout setting
+                for (int second = 0; (second < 10) && IsLoggedOn; ++second)
+                    Thread.Sleep(1000);
+            }
 
-        lock (_sync)
-        {
-            HashSet<SessionID> connectedSessionIDs = new HashSet<SessionID>(_connected);
-            foreach (SessionID sessionId in connectedSessionIDs) {
-                Session? session = Session.LookupSession(sessionId);
-                if (session is not null)
-                    SetDisconnected(session.SessionID);
+            lock (_sync)
+            {
+                HashSet<SessionID> connectedSessionIDs = new HashSet<SessionID>(_connected);
+                foreach (SessionID sessionId in connectedSessionIDs) {
+                    Session? session = Session.LookupSession(sessionId);
+                    if (session is not null)
+                        SetDisconnected(session.SessionID);
+                }
+            }
+
+            IsStopped = true;
+            OnStop();
+
+            // Give OnStop() time to finish its business
+            _thread?.Join(5000);
+
+            lock (_sync)
+            {
+                _thread = null;
+
+                foreach (Session s in _sessions.Values)
+                    s.Dispose();
+
+                _sessions.Clear();
+                _sessionIDs.Clear();
+                _pending.Clear();
+                _connected.Clear();
+                _disconnected.Clear();
             }
         }
-
-        IsStopped = true;
-        OnStop();
-
-        // Give OnStop() time to finish its business
-        _thread?.Join(5000);
-
-        // Null _thread AND clear the session collections in a SINGLE _sync acquisition. Start()'s guard
-        // (which holds _sync) keys on `_thread is not null`; if these were two separate locks, a racing
-        // Start() could slip into the gap, observe the nulled _thread, pass the guard, and rebuild/start a
-        // worker against the not-yet-disposed _sessions — which this block would then dispose out from under
-        // the new worker. One acquisition makes "worker gone" and "sessions cleared" atomic w.r.t. the guard.
-        lock (_sync)
-        {
-            _thread = null;
-
-            foreach (Session s in _sessions.Values)
-                s.Dispose();
-
-            _sessions.Clear();
-            _sessionIDs.Clear();
-            _pending.Clear();
-            _connected.Clear();
-            _disconnected.Clear();
-        }
-
     }
 
     public bool IsLoggedOn
@@ -358,31 +377,38 @@ public abstract class AbstractInitiator : IInitiator
 
     protected void Connect()
     {
+        HashSet<SessionID> disconnectedSessions;
         lock (_sync)
-        {
-            HashSet<SessionID> disconnectedSessions = new HashSet<SessionID>(_disconnected);
-            foreach (SessionID sessionId in disconnectedSessions)
-                Connect(sessionId);
-        }
+            disconnectedSessions = new HashSet<SessionID>(_disconnected);
+
+        foreach (SessionID sessionId in disconnectedSessions)
+            Connect(sessionId);
     }
 
     // FP Enhancement: 2026-08-06 — connect a newly added session without advancing or bypassing other sessions' retry cadence.
     protected void Connect(SessionID sessionId)
     {
-        lock (_sync)
+        Session session;
+        SettingsDictionary settings;
+        lock (_settings)
         {
-            if (!_disconnected.Contains(sessionId))
-                return;
-
-            Session? session = Session.LookupSession(sessionId);
-            if (session is not null && session.IsEnabled)
+            lock (_sync)
             {
+                if (!_disconnected.Contains(sessionId)
+                    || !_sessions.TryGetValue(sessionId, out Session? currentSession)
+                    || !currentSession.IsEnabled)
+                    return;
+
+                session = currentSession;
                 if (session.IsNewSession)
                     session.Reset("New session");
-                if (session.IsSessionTime)
-                    DoConnect(session, _settings.Get(sessionId));
+                if (!session.IsSessionTime)
+                    return;
+                settings = _settings.Get(sessionId);
             }
         }
+
+        DoConnect(session, settings);
     }
 
     protected void SetPending(SessionID sessionId)
@@ -402,6 +428,23 @@ public abstract class AbstractInitiator : IInitiator
             _pending.Remove(sessionId);
             _connected.Add(sessionId);
             _disconnected.Remove(sessionId);
+        }
+    }
+
+    // FP Enhancement: 2026-08-06 — admit pending state only for the current session generation.
+    protected bool TrySetPending(Session session)
+    {
+        lock (_sync)
+        {
+            if (!_disconnected.Contains(session.SessionID)
+                || !_sessions.TryGetValue(session.SessionID, out Session? currentSession)
+                || !ReferenceEquals(currentSession, session))
+                return false;
+
+            _pending.Add(session.SessionID);
+            _connected.Remove(session.SessionID);
+            _disconnected.Remove(session.SessionID);
+            return true;
         }
     }
 
@@ -498,13 +541,16 @@ public abstract class AbstractInitiator : IInitiator
     /// <param name="disposing"></param>
     protected virtual void Dispose(bool disposing)
     {
-        if (_disposed) return;
-        if (disposing)
+        lock (_lifecycleSync)
         {
-            this.Stop();
-            _logFactoryAdapter?.Dispose();
+            if (_disposed) return;
+            if (disposing)
+            {
+                this.Stop();
+                _logFactoryAdapter?.Dispose();
+            }
+            _disposed = true;
         }
-        _disposed = true;
     }
 
     public void Dispose()
