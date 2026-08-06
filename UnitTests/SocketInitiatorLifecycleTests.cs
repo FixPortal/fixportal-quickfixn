@@ -202,6 +202,19 @@ public class SocketInitiatorLifecycleTests
         }
     }
 
+    private sealed class FailingSetupSocketInitiatorThread : SocketInitiatorThread
+    {
+        public FailingSetupSocketInitiatorThread(
+            SocketInitiator initiator,
+            Session session,
+            IQuickFixLoggerFactory loggerFactory)
+            : base(initiator, session, new IPEndPoint(IPAddress.Loopback, 1), new SocketSettings(), loggerFactory)
+        {
+        }
+
+        protected override Stream SetupStream() => throw new IOException("setup failed");
+    }
+
     private class GatedConnectionSocketInitiator : SocketInitiator
     {
         private readonly ManualResetEventSlim _setupEntered;
@@ -400,11 +413,33 @@ public class SocketInitiatorLifecycleTests
             Interlocked.Increment(ref _created) == 1 ? new ThrowingDisposeStore() : new MemoryStore();
     }
 
+    private sealed class ThrowingConnectionFailureLog : ILog
+    {
+        public void Clear() { }
+        public void OnIncoming(string msg) { }
+        public void OnOutgoing(string msg) { }
+        public void OnEvent(string message)
+        {
+            if (message.StartsWith("Connection failed:", StringComparison.Ordinal))
+                throw new InvalidOperationException("logging failed");
+        }
+        public void Dispose() { }
+    }
+
+    private sealed class ThrowingConnectionFailureLogFactory : ILogFactory
+    {
+        public ILog Create(SessionID sessionId) => new ThrowingConnectionFailureLog();
+        public ILog CreateNonSessionLog() => new NullLog();
+    }
+
     private sealed class NoConnectionSocketInitiator : SocketInitiator
     {
-        public NoConnectionSocketInitiator(SessionSettings settings, IMessageStoreFactory storeFactory)
+        public NoConnectionSocketInitiator(
+            SessionSettings settings,
+            IMessageStoreFactory storeFactory,
+            ILogFactory? logFactory = null)
             : base(new SessionTestSupport.MockApplication(), storeFactory, settings,
-                (ILogFactory?)new NullLogFactory())
+                logFactory ?? new NullLogFactory())
         {
         }
 
@@ -791,7 +826,33 @@ public class SocketInitiatorLifecycleTests
     }
 
     [Test]
-    public void RemoveSessionRetainsReservationUntilTimedOutReaderActuallyExits()
+    public void ReaderExitCompletionRunsWhenConnectionFailureLoggingThrows()
+    {
+        SessionSettings settings = InitiatorSettings();
+        var sessionId = new SessionID("FIX.4.2", "INIT_SENDER", "INIT_TARGET");
+        var logFactory = new ThrowingConnectionFailureLogFactory();
+        using var initiator = new NoConnectionSocketInitiator(settings, new MemoryStoreFactory(), logFactory);
+        initiator.Start();
+        Session session = Session.LookupSession(sessionId)!;
+        var thread = new FailingSetupSocketInitiatorThread(
+            initiator, session, new LogFactoryAdapter(logFactory));
+        int completionCalls = 0;
+        Assert.That(thread.TryRunWhenExited(() =>
+        {
+            Interlocked.Increment(ref completionCalls);
+            throw new ApplicationException("completion failed");
+        }), Is.True);
+
+        Assert.That(
+            () => SocketInitiator.SocketInitiatorThreadStart(thread),
+            Throws.TypeOf<InvalidOperationException>().With.Message.EqualTo("logging failed"));
+        Assert.That(Volatile.Read(ref completionCalls), Is.EqualTo(1),
+            "reader-exit completion must run even when connection-failure logging throws");
+    }
+
+    [TestCase(false, TestName = "RemoveSessionRetainsReservationUntilTimedOutReaderActuallyExits")]
+    [TestCase(true, TestName = "RemoveSessionReleasesReservationWhenDeferredDisposalThrows")]
+    public void RemoveSessionDefersCompletionUntilTimedOutReaderActuallyExits(bool disposalThrows)
     {
         using var listener = new TcpListener(IPAddress.Loopback, 0);
         listener.Start();
@@ -805,8 +866,11 @@ public class SocketInitiatorLifecycleTests
         var application = new SettingsReadingApplication(settings);
         var messageFactory = new GatedHeartbeatMessageFactory(
             heartbeatCreationEntered, releaseHeartbeatCreation);
+        IMessageStoreFactory storeFactory = disposalThrows
+            ? new ThrowingFirstStoreFactory()
+            : new MemoryStoreFactory();
         using var initiator = new SocketInitiator(
-            application, new MemoryStoreFactory(), settings, (ILogFactory?)new NullLogFactory(), messageFactory);
+            application, storeFactory, settings, (ILogFactory?)new NullLogFactory(), messageFactory);
         TcpClient? peer = null;
         Thread? remover = null;
         bool removed = false;
