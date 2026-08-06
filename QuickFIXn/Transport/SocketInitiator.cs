@@ -89,7 +89,7 @@ public class SocketInitiator : AbstractInitiator
         }
 
         t.Initiator.RemoveThread(t);
-        t.Initiator.SetDisconnected(t.Session.SessionID);
+        t.Initiator.SetDisconnected(t.Session);
     }
 
     // FP Enhancement: 2026-08-06 — make connection activation atomic with initiator shutdown.
@@ -98,10 +98,9 @@ public class SocketInitiator : AbstractInitiator
         // Lock order: admission monitor, then AbstractInitiator state/session.
         lock (_connectRequestSync)
         {
-            if (_shutdownRequested || !IsPending(thread.Session))
+            if (_shutdownRequested || !TrySetConnected(thread.Session))
                 return false;
 
-            SetConnected(thread.Session.SessionID);
             thread.Session.Log.Log(LogLevel.Information, "Connection succeeded");
             thread.Session.Next();
             return true;

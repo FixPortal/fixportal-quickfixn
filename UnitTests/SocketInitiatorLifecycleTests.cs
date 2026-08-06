@@ -1,7 +1,11 @@
 using System;
 using System.IO;
 using System.Net;
+using System.Net.Security;
 using System.Net.Sockets;
+using System.Security.Cryptography;
+using System.Security.Cryptography.X509Certificates;
+using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using NUnit.Framework;
@@ -270,9 +274,16 @@ public class SocketInitiatorLifecycleTests
         return settings;
     }
 
-    private static bool PeerClosed(TcpClient peer)
+    private static X509Certificate2 CreateServerCertificate()
     {
-        return peer.Client.Poll(1_000_000, SelectMode.SelectRead) && peer.Client.Available == 0;
+        using RSA rsa = RSA.Create(2048);
+        var request = new CertificateRequest(
+            "CN=localhost", rsa, HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1);
+        using X509Certificate2 generated = request.CreateSelfSigned(
+            new DateTimeOffset(2020, 1, 1, 0, 0, 0, TimeSpan.Zero),
+            new DateTimeOffset(2040, 1, 1, 0, 0, 0, TimeSpan.Zero));
+        return X509CertificateLoader.LoadPkcs12(
+            generated.Export(X509ContentType.Pfx), password: null, X509KeyStorageFlags.Exportable);
     }
 
     [Test]
@@ -362,7 +373,7 @@ public class SocketInitiatorLifecycleTests
     }
 
     [Test]
-    public void RemovedGenerationCannotActivateOrCancelReplacement()
+    public void RemovedGenerationCannotActivateOrPreventReplacementActivation()
     {
         using var listener = new TcpListener(IPAddress.Loopback, 0);
         listener.Start();
@@ -391,9 +402,6 @@ public class SocketInitiatorLifecycleTests
                 "replacement connection should reach its TLS setup gate");
             replacementPeer = acceptReplacement.Result;
             replacementPeer.ReceiveTimeout = 5000;
-            byte[] clientHello = new byte[4096];
-            Assert.That(replacementPeer.GetStream().Read(clientHello), Is.GreaterThan(0),
-                "replacement should remain pending after sending its TLS ClientHello");
 
             releaseOldSetup.Set();
 
@@ -401,8 +409,25 @@ public class SocketInitiatorLifecycleTests
                 "old connection worker should complete after setup is released");
             Assert.That(oldStream.WriteCount, Is.Zero,
                 "an old session instance must not activate against replacement pending state");
-            Assert.That(PeerClosed(replacementPeer), Is.False,
-                "old worker cleanup must not cancel the replacement connection");
+
+            using X509Certificate2 certificate = CreateServerCertificate();
+            using var replacementStream = new SslStream(replacementPeer.GetStream());
+            replacementStream.ReadTimeout = 5000;
+            replacementStream.AuthenticateAsServer(certificate);
+            byte[] logon = new byte[4096];
+            string replacementMessage;
+            try
+            {
+                int bytesRead = replacementStream.Read(logon);
+                replacementMessage = Encoding.ASCII.GetString(logon, 0, bytesRead);
+            }
+            catch (IOException)
+            {
+                replacementMessage = string.Empty;
+            }
+
+            Assert.That(replacementMessage, Does.Contain("\u000135=A\u0001"),
+                "replacement should publish its Logon after activation");
         }
         finally
         {
