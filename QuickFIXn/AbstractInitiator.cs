@@ -208,21 +208,19 @@ public abstract class AbstractInitiator : IInitiator
                     _disconnected.Remove(sessionId);
                     _sessionIDs.Remove(sessionId);
                 }
+                // FP Enhancement: 2026-08-06 — reserve removal and detach its settings atomically.
                 _removing.Add(sessionId);
+                _settings.Remove(sessionId);
             }
         }
         if (disconnectRequired)
             session?.Disconnect("Dynamic session removal");
         OnRemove(sessionId); // ensure session's reader thread is gone before we dispose session
         session?.Dispose();
-        // FP Enhancement: 2026-08-06 — reserve the session ID until old-session disposal completes.
-        lock (_settings)
+        // FP Enhancement: 2026-08-06 — release the reservation after old-session disposal completes.
+        lock (_sync)
         {
-            lock (_sync)
-            {
-                _settings.Remove(sessionId);
-                _removing.Remove(sessionId);
-            }
+            _removing.Remove(sessionId);
         }
 
         return true;
