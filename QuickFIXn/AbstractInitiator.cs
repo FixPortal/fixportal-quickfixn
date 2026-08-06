@@ -137,7 +137,11 @@ public abstract class AbstractInitiator : IInitiator
                 return false; // session already exists
 
         if (CreateSession(sessionId, dict))
+        {
+            // FP Enhancement: 2026-08-06 — let transports schedule newly added sessions without connecting on the caller thread.
+            OnAdd(sessionId);
             return true;
+        }
 
         lock (_settings) // failed to create new session
             _settings.Remove(sessionId);
@@ -307,6 +311,13 @@ public abstract class AbstractInitiator : IInitiator
     { }
 
     /// <summary>
+    /// Implement this to react to a successfully added ad-hoc session.
+    /// </summary>
+    /// <param name="sessionId">ID of the added session</param>
+    protected virtual void OnAdd(SessionID sessionId)
+    { }
+
+    /// <summary>
     /// Implement this to provide custom reaction behavior to an ad-hoc session removal.
     /// (This is called after the session is removed.)
     /// </summary>
@@ -350,15 +361,25 @@ public abstract class AbstractInitiator : IInitiator
         {
             HashSet<SessionID> disconnectedSessions = new HashSet<SessionID>(_disconnected);
             foreach (SessionID sessionId in disconnectedSessions)
+                Connect(sessionId);
+        }
+    }
+
+    // FP Enhancement: 2026-08-06 — connect a newly added session without advancing or bypassing other sessions' retry cadence.
+    protected void Connect(SessionID sessionId)
+    {
+        lock (_sync)
+        {
+            if (!_disconnected.Contains(sessionId))
+                return;
+
+            Session? session = Session.LookupSession(sessionId);
+            if (session is not null && session.IsEnabled)
             {
-                Session? session = Session.LookupSession(sessionId);
-                if (session is not null && session.IsEnabled)
-                {
-                    if (session.IsNewSession)
-                        session.Reset("New session");
-                    if (session.IsSessionTime)
-                        DoConnect(session, _settings.Get(sessionId));
-                }
+                if (session.IsNewSession)
+                    session.Reset("New session");
+                if (session.IsSessionTime)
+                    DoConnect(session, _settings.Get(sessionId));
             }
         }
     }
