@@ -195,11 +195,12 @@ public abstract class AbstractInitiator : IInitiator
                 _sessionIDs.Remove(sessionId);
             }
         }
-        lock (_settings)
-            _settings.Remove(sessionId);
         if (disconnectRequired)
             session?.Disconnect("Dynamic session removal");
         OnRemove(sessionId); // ensure session's reader thread is gone before we dispose session
+        // FP Enhancement: 2026-08-06 — reserve the session ID until transport cleanup completes.
+        lock (_settings)
+            _settings.Remove(sessionId);
         session?.Dispose();
 
         return true;
@@ -422,6 +423,17 @@ public abstract class AbstractInitiator : IInitiator
         lock (_sync)
         {
             return _pending.Contains(sessionId);
+        }
+    }
+
+    // FP Enhancement: 2026-08-06 — distinguish a pending session from an older same-ID generation.
+    protected bool IsPending(Session session)
+    {
+        lock (_sync)
+        {
+            return _pending.Contains(session.SessionID)
+                && _sessions.TryGetValue(session.SessionID, out Session? pendingSession)
+                && ReferenceEquals(pendingSession, session);
         }
     }
 
