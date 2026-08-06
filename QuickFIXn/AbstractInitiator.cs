@@ -198,10 +198,10 @@ public abstract class AbstractInitiator : IInitiator
         if (disconnectRequired)
             session?.Disconnect("Dynamic session removal");
         OnRemove(sessionId); // ensure session's reader thread is gone before we dispose session
-        // FP Enhancement: 2026-08-06 — reserve the session ID until transport cleanup completes.
+        session?.Dispose();
+        // FP Enhancement: 2026-08-06 — reserve the session ID until old-session disposal completes.
         lock (_settings)
             _settings.Remove(sessionId);
-        session?.Dispose();
 
         return true;
     }

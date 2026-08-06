@@ -205,6 +205,63 @@ public class SocketInitiatorLifecycleTests
         }
     }
 
+    private sealed class GatedDisposeStore : MemoryStore
+    {
+        private readonly ManualResetEventSlim _disposeEntered;
+        private readonly ManualResetEventSlim _releaseDispose;
+
+        public GatedDisposeStore(ManualResetEventSlim disposeEntered, ManualResetEventSlim releaseDispose)
+        {
+            _disposeEntered = disposeEntered;
+            _releaseDispose = releaseDispose;
+        }
+
+        protected override void Dispose(bool disposing)
+        {
+            if (disposing)
+            {
+                _disposeEntered.Set();
+                _releaseDispose.Wait();
+            }
+            base.Dispose(disposing);
+        }
+    }
+
+    private sealed class GatedFirstStoreFactory : IMessageStoreFactory
+    {
+        private readonly ManualResetEventSlim _disposeEntered;
+        private readonly ManualResetEventSlim _releaseDispose;
+        private int _created;
+
+        public GatedFirstStoreFactory(
+            ManualResetEventSlim disposeEntered,
+            ManualResetEventSlim releaseDispose)
+        {
+            _disposeEntered = disposeEntered;
+            _releaseDispose = releaseDispose;
+        }
+
+        public IMessageStore Create(SessionID sessionId)
+        {
+            return Interlocked.Increment(ref _created) == 1
+                ? new GatedDisposeStore(_disposeEntered, _releaseDispose)
+                : new MemoryStore();
+        }
+    }
+
+    private sealed class NoConnectionSocketInitiator : SocketInitiator
+    {
+        public NoConnectionSocketInitiator(SessionSettings settings, IMessageStoreFactory storeFactory)
+            : base(new SessionTestSupport.MockApplication(), storeFactory, settings,
+                (ILogFactory?)new NullLogFactory())
+        {
+        }
+
+        protected override void DoConnect(Session session, SettingsDictionary settings)
+        {
+        }
+    }
+
     private sealed class GatedSocketInitiator : SocketInitiator
     {
         private readonly ManualResetEventSlim _workerEntered;
@@ -368,6 +425,45 @@ public class SocketInitiatorLifecycleTests
             releaseRemove.Set();
             initiator.ConnectionThread?.Disconnect();
             initiator.ConnectionThread?.Join();
+            remover?.Join(5000);
+        }
+    }
+
+    [Test]
+    public void RemoveSessionReservesIdUntilOldSessionDisposeCompletes()
+    {
+        using var disposeEntered = new ManualResetEventSlim();
+        using var releaseDispose = new ManualResetEventSlim();
+        SessionSettings settings = InitiatorSettings();
+        var sessionId = new SessionID("FIX.4.2", "INIT_SENDER", "INIT_TARGET");
+        SettingsDictionary sessionSettings = settings.Get(sessionId);
+        var storeFactory = new GatedFirstStoreFactory(disposeEntered, releaseDispose);
+        using var initiator = new NoConnectionSocketInitiator(settings, storeFactory);
+        Thread? remover = null;
+        bool removed = false;
+
+        try
+        {
+            initiator.Start();
+            remover = new Thread(() => removed = initiator.RemoveSession(sessionId, terminateActiveSession: true));
+            remover.Start();
+            Assert.That(disposeEntered.Wait(5000), Is.True,
+                "old session disposal should begin after transport cleanup");
+
+            Assert.That(initiator.AddSession(sessionId, sessionSettings), Is.False,
+                "same-ID re-add must wait for old session disposal");
+
+            releaseDispose.Set();
+            Assert.That(remover.Join(5000), Is.True, "session removal should complete after disposal is released");
+            Assert.That(removed, Is.True);
+            Assert.That(initiator.AddSession(sessionId, sessionSettings), Is.True,
+                "same-ID re-add should succeed after removal returns");
+            Assert.That(Session.LookupSession(sessionId), Is.Not.Null,
+                "replacement should remain registered after old session disposal");
+        }
+        finally
+        {
+            releaseDispose.Set();
             remover?.Join(5000);
         }
     }
