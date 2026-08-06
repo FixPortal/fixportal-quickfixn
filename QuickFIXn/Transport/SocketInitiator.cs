@@ -21,6 +21,7 @@ public class SocketInitiator : AbstractInitiator
     private int _reconnectInterval = 30;
     private readonly SocketSettings _socketSettings = new();
     private readonly Dictionary<SessionID, SocketInitiatorThread> _threads = new();
+    private readonly Dictionary<SessionID, SocketInitiatorThread> _removedThreads = new();
     private readonly Dictionary<SessionID, int> _sessionToHostNum = new();
     private readonly object _sync = new();
     // FP Enhancement: 2026-08-06 — wake the worker for dynamic sessions while preserving established retry pacing.
@@ -89,8 +90,15 @@ public class SocketInitiator : AbstractInitiator
             LogThreadStartConnectionFailed(t, ex);
         }
 
-        t.Initiator.RemoveThread(t);
-        t.Initiator.SetDisconnected(t.Session);
+        try
+        {
+            t.Initiator.RemoveThread(t);
+            t.Initiator.SetDisconnected(t.Session);
+        }
+        finally
+        {
+            t.SignalExited();
+        }
     }
 
     // FP Enhancement: 2026-08-06 — make connection activation atomic with initiator shutdown.
@@ -145,13 +153,13 @@ public class SocketInitiator : AbstractInitiator
     }
 
     // FP Enhancement: 2026-08-06 — detach socket workers under lock and join them after releasing it.
-    private void RemoveThread(SessionID sessionId)
+    private SocketInitiatorThread? RemoveThread(SessionID sessionId)
     {
         SocketInitiatorThread? thread;
         lock (_sync)
         {
             if (!_threads.Remove(sessionId, out thread))
-                return;
+                return null;
         }
 
         try
@@ -159,6 +167,7 @@ public class SocketInitiator : AbstractInitiator
             thread.Join();
         }
         catch { }
+        return thread;
     }
 
     private IPEndPoint GetNextSocketEndPoint(
@@ -292,7 +301,41 @@ public class SocketInitiator : AbstractInitiator
     {
         lock (_connectRequestSync)
             _connectRequests.Remove(sessionId);
-        RemoveThread(sessionId);
+        SocketInitiatorThread? thread = RemoveThread(sessionId);
+        if (thread is not null)
+        {
+            lock (_sync)
+                _removedThreads[sessionId] = thread;
+        }
+    }
+
+    internal override bool TryDeferRemovalUntilQuiesced(SessionID sessionId, Action completion)
+    {
+        SocketInitiatorThread? thread;
+        lock (_sync)
+        {
+            if (!_removedThreads.Remove(sessionId, out thread))
+                return false;
+        }
+
+        return thread.TryRunWhenExited(() =>
+        {
+            try
+            {
+                completion();
+            }
+            catch (Exception ex)
+            {
+                try
+                {
+                    _nonSessionLog.Log(
+                        LogLevel.Error, ex,
+                        "Deferred session removal failed after reader exit [session {SessionID}]: {Message}",
+                        sessionId, ex.Message);
+                }
+                catch { }
+            }
+        });
     }
 
     protected override bool OnPoll(double timeout)

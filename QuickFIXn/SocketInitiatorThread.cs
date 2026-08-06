@@ -22,6 +22,9 @@ public class SocketInitiatorThread : IResponder
     public const int BUF_SIZE = 512;
 
     private Thread? _thread;
+    private readonly object _completionSync = new();
+    private bool _exited;
+    private Action? _exitCallback;
     private readonly byte[] _readBuffer = new byte[BUF_SIZE];
     private readonly Parser _parser = new();
     private Stream? _stream;
@@ -65,6 +68,30 @@ public class SocketInitiatorThread : IResponder
         if (Environment.CurrentManagedThreadId != _thread.ManagedThreadId)
             _thread.Join(2000);
         _thread = null;
+    }
+
+    internal bool TryRunWhenExited(Action callback)
+    {
+        lock (_completionSync)
+        {
+            if (_exited)
+                return false;
+            _exitCallback += callback;
+            return true;
+        }
+    }
+
+    internal void SignalExited()
+    {
+        Action? callback;
+        lock (_completionSync)
+        {
+            _exited = true;
+            _thread = null;
+            callback = _exitCallback;
+            _exitCallback = null;
+        }
+        callback?.Invoke();
     }
 
     public void Connect()
