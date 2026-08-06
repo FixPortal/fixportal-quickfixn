@@ -60,11 +60,11 @@ public class SocketInitiator : AbstractInitiator
         try
         {
             t.Connect();
-            t.Initiator.SetConnected(t.Session.SessionID);
-            t.Session.Log.Log(LogLevel.Information, "Connection succeeded");
-            t.Session.Next();
-            while (t.Read()) {
-                // Read dispatches each complete message and returns whether the stream remains open.
+            if (t.Initiator.TryActivate(t))
+            {
+                while (t.Read()) {
+                    // Read dispatches each complete message and returns whether the stream remains open.
+                }
             }
         }
         catch (OperationCanceledException)
@@ -90,6 +90,22 @@ public class SocketInitiator : AbstractInitiator
 
         t.Initiator.RemoveThread(t);
         t.Initiator.SetDisconnected(t.Session.SessionID);
+    }
+
+    // FP Enhancement: 2026-08-06 — make connection activation atomic with initiator shutdown.
+    private bool TryActivate(SocketInitiatorThread thread)
+    {
+        // Lock order: admission monitor, then AbstractInitiator state/session.
+        lock (_connectRequestSync)
+        {
+            if (_shutdownRequested)
+                return false;
+
+            SetConnected(thread.Session.SessionID);
+            thread.Session.Log.Log(LogLevel.Information, "Connection succeeded");
+            thread.Session.Next();
+            return true;
+        }
     }
 
     private static void LogThreadStartConnectionFailed(SocketInitiatorThread t, Exception e) {
