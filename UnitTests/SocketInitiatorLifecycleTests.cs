@@ -15,8 +15,15 @@ public class SocketInitiatorLifecycleTests
 {
     private sealed class RecordingStream : Stream
     {
+        private readonly ManualResetEventSlim? _disposed;
+
         public int WriteCount;
         public bool IsDisposed;
+
+        public RecordingStream(ManualResetEventSlim? disposed = null)
+        {
+            _disposed = disposed;
+        }
 
         public override bool CanRead => true;
         public override bool CanSeek => false;
@@ -32,6 +39,7 @@ public class SocketInitiatorLifecycleTests
         protected override void Dispose(bool disposing)
         {
             IsDisposed = true;
+            _disposed?.Set();
             base.Dispose(disposing);
         }
     }
@@ -41,6 +49,7 @@ public class SocketInitiatorLifecycleTests
         private readonly ManualResetEventSlim _setupEntered;
         private readonly ManualResetEventSlim _releaseSetup;
         private readonly Stream _stream;
+        private Thread? _worker;
 
         public GatedSetupSocketInitiatorThread(
             SocketInitiator initiator,
@@ -56,6 +65,22 @@ public class SocketInitiatorLifecycleTests
             _stream = stream;
         }
 
+        public new void Start()
+        {
+            _worker = new Thread(state => SocketInitiator.SocketInitiatorThreadStart(state));
+            _worker.Start(this);
+        }
+
+        public bool WaitForCompletion(int millisecondsTimeout) => _worker?.Join(millisecondsTimeout) ?? true;
+
+        public new void Join()
+        {
+            Disconnect();
+            if (_worker is not null && Environment.CurrentManagedThreadId != _worker.ManagedThreadId)
+                _worker.Join(2000);
+            _worker = null;
+        }
+
         protected override Stream SetupStream()
         {
             _setupEntered.Set();
@@ -65,7 +90,7 @@ public class SocketInitiatorLifecycleTests
         }
     }
 
-    private sealed class GatedConnectionSocketInitiator : SocketInitiator
+    private class GatedConnectionSocketInitiator : SocketInitiator
     {
         private readonly ManualResetEventSlim _setupEntered;
         private readonly ManualResetEventSlim _releaseSetup;
@@ -97,6 +122,32 @@ public class SocketInitiatorLifecycleTests
         {
             ConnectionThread?.Disconnect();
             base.OnStop();
+        }
+    }
+
+    private sealed class GatedRemovalSocketInitiator : GatedConnectionSocketInitiator
+    {
+        private readonly ManualResetEventSlim _removeEntered;
+        private readonly ManualResetEventSlim _releaseRemove;
+
+        public GatedRemovalSocketInitiator(
+            SessionSettings settings,
+            ManualResetEventSlim setupEntered,
+            ManualResetEventSlim releaseSetup,
+            Stream stream,
+            ManualResetEventSlim removeEntered,
+            ManualResetEventSlim releaseRemove)
+            : base(settings, setupEntered, releaseSetup, stream)
+        {
+            _removeEntered = removeEntered;
+            _releaseRemove = releaseRemove;
+        }
+
+        protected override void OnRemove(SessionID sessionId)
+        {
+            _removeEntered.Set();
+            _releaseRemove.Wait();
+            base.OnRemove(sessionId);
         }
     }
 
@@ -190,6 +241,53 @@ public class SocketInitiatorLifecycleTests
             releaseSetup.Set();
             initiator.ConnectionThread?.Disconnect();
             initiator.ConnectionThread?.Join();
+        }
+    }
+
+    [Test]
+    public void RemoveWhileConnectionSetupIsBlockedRejectsItsLateActivation()
+    {
+        using var setupEntered = new ManualResetEventSlim();
+        using var releaseSetup = new ManualResetEventSlim();
+        using var removeEntered = new ManualResetEventSlim();
+        using var releaseRemove = new ManualResetEventSlim();
+        using var streamDisposed = new ManualResetEventSlim();
+        var stream = new RecordingStream(streamDisposed);
+        using var initiator = new GatedRemovalSocketInitiator(
+            InitiatorSettings(), setupEntered, releaseSetup, stream, removeEntered, releaseRemove);
+        Thread? remover = null;
+        bool removed = false;
+
+        try
+        {
+            initiator.Start();
+            Assert.That(setupEntered.Wait(5000), Is.True, "connection setup should reach its gate");
+
+            SessionID sessionId = initiator.ConnectionThread!.Session.SessionID;
+            remover = new Thread(() => removed = initiator.RemoveSession(sessionId, terminateActiveSession: true));
+            remover.Start();
+            Assert.That(removeEntered.Wait(5000), Is.True,
+                "removal should clear initiator state before transport cleanup starts");
+
+            releaseSetup.Set();
+
+            Assert.That(initiator.ConnectionThread.WaitForCompletion(5000), Is.True,
+                "the connection worker should complete while transport removal remains paused");
+            Assert.That(stream.WriteCount, Is.Zero, "a removed session must not publish a late Logon");
+            initiator.ConnectionThread.Disconnect();
+            Assert.That(streamDisposed.Wait(5000), Is.True, "completed worker stream should be released");
+
+            releaseRemove.Set();
+            Assert.That(remover.Join(5000), Is.True, "session removal should complete after cleanup is released");
+            Assert.That(removed, Is.True);
+        }
+        finally
+        {
+            releaseSetup.Set();
+            releaseRemove.Set();
+            initiator.ConnectionThread?.Disconnect();
+            initiator.ConnectionThread?.Join();
+            remover?.Join(5000);
         }
     }
 
