@@ -188,6 +188,7 @@ public abstract class AbstractInitiator : IInitiator
     public bool RemoveSession(SessionID sessionId, bool terminateActiveSession)
     {
         Session? session = null;
+        SettingsDictionary? sessionSettings = null;
         bool disconnectRequired = false;
         lock (_settings)
         {
@@ -208,19 +209,29 @@ public abstract class AbstractInitiator : IInitiator
                     _disconnected.Remove(sessionId);
                     _sessionIDs.Remove(sessionId);
                 }
-                // FP Enhancement: 2026-08-06 — reserve removal and detach its settings atomically.
+                // FP Enhancement: 2026-08-06 — reserve removal while the old transport can still
+                // run application callbacks, and remember exactly which generation owns settings.
                 _removing.Add(sessionId);
-                _settings.Remove(sessionId);
+                if (_settings.Has(sessionId))
+                    sessionSettings = _settings.Get(sessionId);
             }
         }
         if (disconnectRequired)
             session?.Disconnect("Dynamic session removal");
         OnRemove(sessionId); // ensure session's reader thread is gone before we dispose session
         session?.Dispose();
-        // FP Enhancement: 2026-08-06 — release the reservation after old-session disposal completes.
-        lock (_sync)
+        // FP Enhancement: 2026-08-06 — detach only the settings captured by this generation. A
+        // same-ID replacement inserted while a missing-session removal was quiescing must survive.
+        lock (_settings)
         {
-            _removing.Remove(sessionId);
+            lock (_sync)
+            {
+                if (sessionSettings is not null
+                    && _settings.Has(sessionId)
+                    && ReferenceEquals(_settings.Get(sessionId), sessionSettings))
+                    _settings.Remove(sessionId);
+                _removing.Remove(sessionId);
+            }
         }
 
         return true;
