@@ -4,6 +4,7 @@ using System.Linq;
 using System.Net;
 using System.Net.Sockets;
 using System.Text;
+using System.Threading;
 using QuickFix.Logger;
 
 namespace QuickFix.Transport;
@@ -14,7 +15,8 @@ namespace QuickFix.Transport;
 /// </summary>
 internal static class StreamFactory
 {
-    private static Socket? CreateTunnelThruProxy(string destIp, int destPort, string destHostName)
+    private static Socket? CreateTunnelThruProxy(
+        string destIp, int destPort, string destHostName, CancellationToken cancellationToken)
     {
         string destUriWithPort = $"{destIp}:{destPort}";
         UriBuilder uriBuilder = new UriBuilder(destUriWithPort);
@@ -42,6 +44,8 @@ internal static class StreamFactory
         IPAddress address = proxyEntry.First(a => a.AddressFamily == AddressFamily.InterNetwork);
         IPEndPoint proxyEndPoint = new IPEndPoint(address, iPort);
         Socket socketThruProxy = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp);
+        // FP Enhancement: 2026-08-06 — closing the connecting socket makes synchronous setup cancellable.
+        using CancellationTokenRegistration registration = cancellationToken.Register(socketThruProxy.Dispose);
         socketThruProxy.Connect(proxyEndPoint);
 
         string proxyMsg = $"CONNECT {destHostName}:{destPort} HTTP/1.1\nHost: {destHostName}:{destPort}\n\n";
@@ -65,8 +69,13 @@ internal static class StreamFactory
     /// <param name="endpoint">The endpoint.</param>
     /// <param name="settings">The socket settings.</param>
     /// <param name="loggerFactory"></param>
+    /// <param name="cancellationToken">Cancels connection and authentication setup.</param>
     /// <returns>an opened and initiated stream which can be read and written to</returns>
-    internal static Stream CreateClientStream(IPEndPoint endpoint, SocketSettings settings, IQuickFixLoggerFactory loggerFactory)
+    internal static Stream CreateClientStream(
+        IPEndPoint endpoint,
+        SocketSettings settings,
+        IQuickFixLoggerFactory loggerFactory,
+        CancellationToken cancellationToken)
     {
         Socket? socket = null;
 
@@ -77,7 +86,8 @@ internal static class StreamFactory
                     $"{SessionSettings.SOCKET_IGNORE_PROXY}=Y needs {SessionSettings.SSL_SERVERNAME} to be set");
             }
             // If system has configured a proxy for this config, use it.
-            socket = CreateTunnelThruProxy(endpoint.Address.ToString(), endpoint.Port, settings.ServerCommonName);
+            socket = CreateTunnelThruProxy(
+                endpoint.Address.ToString(), endpoint.Port, settings.ServerCommonName, cancellationToken);
         }
 
         // No proxy.  Set up a regular socket.
@@ -93,8 +103,12 @@ internal static class StreamFactory
             {
                 socket.SendBufferSize = settings.SocketSendBufferSize.Value;
             }
-            socket.Connect(endpoint);
         }
+
+        using CancellationTokenRegistration registration = cancellationToken.Register(socket.Dispose);
+        if (!socket.Connected)
+            socket.Connect(endpoint);
+
         if (settings.SocketReceiveTimeout.HasValue)
         {
             socket.ReceiveTimeout = settings.SocketReceiveTimeout.Value;

@@ -1,3 +1,6 @@
+using System;
+using System.IO;
+using System.Net;
 using System.Threading;
 using NUnit.Framework;
 using QuickFix;
@@ -10,6 +13,93 @@ namespace UnitTests;
 [TestFixture]
 public class SocketInitiatorLifecycleTests
 {
+    private sealed class RecordingStream : Stream
+    {
+        public int WriteCount;
+        public bool IsDisposed;
+
+        public override bool CanRead => true;
+        public override bool CanSeek => false;
+        public override bool CanWrite => true;
+        public override long Length => 0;
+        public override long Position { get => 0; set => throw new NotSupportedException(); }
+        public override void Flush() { }
+        public override int Read(byte[] buffer, int offset, int count) => 0;
+        public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+        public override void SetLength(long value) => throw new NotSupportedException();
+        public override void Write(byte[] buffer, int offset, int count) => Interlocked.Increment(ref WriteCount);
+
+        protected override void Dispose(bool disposing)
+        {
+            IsDisposed = true;
+            base.Dispose(disposing);
+        }
+    }
+
+    private sealed class GatedSetupSocketInitiatorThread : SocketInitiatorThread
+    {
+        private readonly ManualResetEventSlim _setupEntered;
+        private readonly ManualResetEventSlim _releaseSetup;
+        private readonly Stream _stream;
+
+        public GatedSetupSocketInitiatorThread(
+            SocketInitiator initiator,
+            Session session,
+            ManualResetEventSlim setupEntered,
+            ManualResetEventSlim releaseSetup,
+            Stream stream)
+            : base(initiator, session, new IPEndPoint(IPAddress.Loopback, 1), new SocketSettings(),
+                new LogFactoryAdapter(new NullLogFactory()))
+        {
+            _setupEntered = setupEntered;
+            _releaseSetup = releaseSetup;
+            _stream = stream;
+        }
+
+        protected override Stream SetupStream()
+        {
+            _setupEntered.Set();
+            if (!_releaseSetup.Wait(5000))
+                throw new TimeoutException("test did not release connection setup");
+            return _stream;
+        }
+    }
+
+    private sealed class GatedConnectionSocketInitiator : SocketInitiator
+    {
+        private readonly ManualResetEventSlim _setupEntered;
+        private readonly ManualResetEventSlim _releaseSetup;
+        private readonly Stream _stream;
+
+        public GatedSetupSocketInitiatorThread? ConnectionThread { get; private set; }
+
+        public GatedConnectionSocketInitiator(
+            SessionSettings settings,
+            ManualResetEventSlim setupEntered,
+            ManualResetEventSlim releaseSetup,
+            Stream stream)
+            : base(new SessionTestSupport.MockApplication(), new MemoryStoreFactory(), settings,
+                (ILogFactory?)new NullLogFactory())
+        {
+            _setupEntered = setupEntered;
+            _releaseSetup = releaseSetup;
+            _stream = stream;
+        }
+
+        protected override void DoConnect(Session session, SettingsDictionary settings)
+        {
+            ConnectionThread = new GatedSetupSocketInitiatorThread(
+                this, session, _setupEntered, _releaseSetup, _stream);
+            ConnectionThread.Start();
+        }
+
+        protected override void OnStop()
+        {
+            ConnectionThread?.Disconnect();
+            base.OnStop();
+        }
+    }
+
     private sealed class GatedSocketInitiator : SocketInitiator
     {
         private readonly ManualResetEventSlim _workerEntered;
@@ -69,6 +159,38 @@ public class SocketInitiatorLifecycleTests
         var settings = new SessionSettings();
         settings.Set(new SessionID("FIX.4.2", "INIT_SENDER", "INIT_TARGET"), session);
         return settings;
+    }
+
+    [Test]
+    public void StopWhileConnectionSetupIsBlockedRejectsItsLateStream()
+    {
+        using var setupEntered = new ManualResetEventSlim();
+        using var releaseSetup = new ManualResetEventSlim();
+        var stream = new RecordingStream();
+        using var initiator = new GatedConnectionSocketInitiator(
+            InitiatorSettings(), setupEntered, releaseSetup, stream);
+
+        try
+        {
+            initiator.Start();
+            Assert.That(setupEntered.Wait(5000), Is.True, "connection setup should reach its gate");
+
+            initiator.Stop(force: true);
+            Assert.That(initiator.ConnectionThread!.Session.Disposed, Is.True,
+                "stop should dispose the session before setup completes");
+
+            releaseSetup.Set();
+            initiator.ConnectionThread.Join();
+
+            Assert.That(stream.IsDisposed, Is.True, "a stream completed after disconnect must be disposed");
+            Assert.That(stream.WriteCount, Is.Zero, "a stopped session must not publish a late Logon");
+        }
+        finally
+        {
+            releaseSetup.Set();
+            initiator.ConnectionThread?.Disconnect();
+            initiator.ConnectionThread?.Join();
+        }
     }
 
     [Test]
