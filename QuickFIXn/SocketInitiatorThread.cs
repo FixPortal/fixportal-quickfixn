@@ -71,7 +71,17 @@ public class SocketInitiatorThread : IResponder
     {
         Debug.Assert(_stream == null);
 
-        _stream = SetupStream();
+        Stream stream = SetupStream();
+        // FP Enhancement: 2026-08-06 — reject connection setup that completes after disconnect won the race.
+        lock (_disconnectSync)
+        {
+            if (_disconnected)
+            {
+                stream.Dispose();
+                throw new OperationCanceledException("Connection setup was cancelled");
+            }
+            _stream = stream;
+        }
         Session.SetResponder(this);
     }
 
@@ -82,7 +92,16 @@ public class SocketInitiatorThread : IResponder
     /// <returns>Stream representing the (network)connection to the other party</returns>
     protected virtual Stream SetupStream()
     {
-        return Transport.StreamFactory.CreateClientStream(_socketEndPoint, _socketSettings, _loggerFactory);
+        CancellationToken cancellationToken = _readCancellationTokenSource.Token;
+        try
+        {
+            return Transport.StreamFactory.CreateClientStream(
+                _socketEndPoint, _socketSettings, _loggerFactory, cancellationToken);
+        }
+        catch (Exception) when (cancellationToken.IsCancellationRequested)
+        {
+            throw new OperationCanceledException(cancellationToken);
+        }
     }
 
     public bool Read()

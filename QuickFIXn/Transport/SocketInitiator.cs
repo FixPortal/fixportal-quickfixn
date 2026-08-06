@@ -67,6 +67,10 @@ public class SocketInitiator : AbstractInitiator
                 // Read dispatches each complete message and returns whether the stream remains open.
             }
         }
+        catch (OperationCanceledException)
+        {
+            // Expected when shutdown interrupts connection setup.
+        }
         catch (IOException ex) // Can be exception when connecting, during ssl authentication or when reading
         {
             LogThreadStartConnectionFailed(t, ex);
