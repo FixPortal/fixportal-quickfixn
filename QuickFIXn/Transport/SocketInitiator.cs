@@ -98,7 +98,7 @@ public class SocketInitiator : AbstractInitiator
         // Lock order: admission monitor, then AbstractInitiator state/session.
         lock (_connectRequestSync)
         {
-            if (_shutdownRequested)
+            if (_shutdownRequested || !IsPending(thread.Session.SessionID))
                 return false;
 
             SetConnected(thread.Session.SessionID);
