@@ -405,6 +405,23 @@ public abstract class AbstractInitiator : IInitiator
         }
     }
 
+    // FP Enhancement: 2026-08-06 — validate and activate one session generation atomically.
+    protected bool TrySetConnected(Session session)
+    {
+        lock (_sync)
+        {
+            if (!_pending.Contains(session.SessionID)
+                || !_sessions.TryGetValue(session.SessionID, out Session? pendingSession)
+                || !ReferenceEquals(pendingSession, session))
+                return false;
+
+            _pending.Remove(session.SessionID);
+            _connected.Add(session.SessionID);
+            _disconnected.Remove(session.SessionID);
+            return true;
+        }
+    }
+
     protected void SetDisconnected(SessionID sessionId)
     {
         lock (_sync)
@@ -426,14 +443,18 @@ public abstract class AbstractInitiator : IInitiator
         }
     }
 
-    // FP Enhancement: 2026-08-06 — distinguish a pending session from an older same-ID generation.
-    protected bool IsPending(Session session)
+    // FP Enhancement: 2026-08-06 — a stale worker cannot disconnect a newer same-ID generation.
+    protected void SetDisconnected(Session session)
     {
         lock (_sync)
         {
-            return _pending.Contains(session.SessionID)
-                && _sessions.TryGetValue(session.SessionID, out Session? pendingSession)
-                && ReferenceEquals(pendingSession, session);
+            if (!_sessions.TryGetValue(session.SessionID, out Session? currentSession)
+                || !ReferenceEquals(currentSession, session))
+                return;
+
+            _pending.Remove(session.SessionID);
+            _connected.Remove(session.SessionID);
+            _disconnected.Add(session.SessionID);
         }
     }
 
