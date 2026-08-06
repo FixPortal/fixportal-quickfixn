@@ -21,6 +21,23 @@ namespace UnitTests;
 [TestFixture]
 public class SocketInitiatorLifecycleTests
 {
+    private sealed class SettingsReadingApplication(SessionSettings settings) : IApplication
+    {
+        public string? ObservedHmacSecret { get; private set; }
+
+        public void ToAdmin(Message message, SessionID sessionId)
+        {
+            ObservedHmacSecret = settings.Get(sessionId).GetString("FPSimHmacSecret");
+        }
+
+        public void FromAdmin(Message message, SessionID sessionId) { }
+        public void ToApp(Message message, SessionID sessionId) { }
+        public void FromApp(Message message, SessionID sessionId) { }
+        public void OnCreate(SessionID sessionId) { }
+        public void OnLogout(SessionID sessionId) { }
+        public void OnLogon(SessionID sessionId) { }
+    }
+
     private sealed class GatedConnectionTypeComparer : IEqualityComparer<string>
     {
         private readonly ManualResetEventSlim _admissionEntered;
@@ -200,6 +217,32 @@ public class SocketInitiatorLifecycleTests
             _removeEntered = removeEntered;
             _releaseRemove = releaseRemove;
         }
+
+        protected override void OnRemove(SessionID sessionId)
+        {
+            _removeEntered.Set();
+            _releaseRemove.Wait();
+            base.OnRemove(sessionId);
+        }
+    }
+
+    private sealed class GatedSettingsLifetimeSocketInitiator : SocketInitiator
+    {
+        private readonly ManualResetEventSlim _removeEntered;
+        private readonly ManualResetEventSlim _releaseRemove;
+
+        public GatedSettingsLifetimeSocketInitiator(
+            IApplication application,
+            SessionSettings settings,
+            ManualResetEventSlim removeEntered,
+            ManualResetEventSlim releaseRemove)
+            : base(application, new MemoryStoreFactory(), settings, (ILogFactory?)new NullLogFactory())
+        {
+            _removeEntered = removeEntered;
+            _releaseRemove = releaseRemove;
+        }
+
+        protected override void DoConnect(Session session, SettingsDictionary settings) { }
 
         protected override void OnRemove(SessionID sessionId)
         {
@@ -641,6 +684,43 @@ public class SocketInitiatorLifecycleTests
         finally
         {
             releaseDispose.Set();
+            remover?.Join(5000);
+        }
+    }
+
+    [Test]
+    public void RemoveSessionRetainsOldSettingsUntilTransportCleanupCompletes()
+    {
+        using var removeEntered = new ManualResetEventSlim();
+        using var releaseRemove = new ManualResetEventSlim();
+        SessionSettings settings = InitiatorSettings();
+        var sessionId = new SessionID("FIX.4.2", "INIT_SENDER", "INIT_TARGET");
+        settings.Get(sessionId).SetString("FPSimHmacSecret", "generation-secret");
+        var application = new SettingsReadingApplication(settings);
+        using var initiator = new GatedSettingsLifetimeSocketInitiator(
+            application, settings, removeEntered, releaseRemove);
+        Thread? remover = null;
+
+        try
+        {
+            initiator.Start();
+            remover = new Thread(() => initiator.RemoveSession(sessionId, terminateActiveSession: true));
+            remover.Start();
+            Assert.That(removeEntered.Wait(5000), Is.True,
+                "removal should reach transport cleanup before the old generation's final callback");
+
+            Assert.That(() => application.ToAdmin(new Message(), sessionId), Throws.Nothing,
+                "an old-generation ToAdmin can still run until transport cleanup quiesces");
+            Assert.That(application.ObservedHmacSecret, Is.EqualTo("generation-secret"));
+
+            releaseRemove.Set();
+            Assert.That(remover.Join(5000), Is.True);
+            Assert.That(settings.Has(sessionId), Is.False,
+                "the old generation's settings should be detached after transport cleanup");
+        }
+        finally
+        {
+            releaseRemove.Set();
             remover?.Join(5000);
         }
     }
