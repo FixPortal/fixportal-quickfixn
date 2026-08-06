@@ -23,11 +23,14 @@ public class SocketInitiatorLifecycleTests
 {
     private sealed class SettingsReadingApplication(SessionSettings settings) : IApplication
     {
+        public ManualResetEventSlim ToAdminCalled { get; } = new();
+        public ManualResetEventSlim LoggedOn { get; } = new();
         public string? ObservedHmacSecret { get; private set; }
 
         public void ToAdmin(Message message, SessionID sessionId)
         {
             ObservedHmacSecret = settings.Get(sessionId).GetString("FPSimHmacSecret");
+            ToAdminCalled.Set();
         }
 
         public void FromAdmin(Message message, SessionID sessionId) { }
@@ -35,7 +38,41 @@ public class SocketInitiatorLifecycleTests
         public void FromApp(Message message, SessionID sessionId) { }
         public void OnCreate(SessionID sessionId) { }
         public void OnLogout(SessionID sessionId) { }
-        public void OnLogon(SessionID sessionId) { }
+        public void OnLogon(SessionID sessionId) => LoggedOn.Set();
+    }
+
+    private sealed class GatedHeartbeatMessageFactory : IMessageFactory
+    {
+        private readonly IMessageFactory _inner = new DefaultMessageFactory();
+        private readonly ManualResetEventSlim _heartbeatCreationEntered;
+        private readonly ManualResetEventSlim _releaseHeartbeatCreation;
+
+        public GatedHeartbeatMessageFactory(
+            ManualResetEventSlim heartbeatCreationEntered,
+            ManualResetEventSlim releaseHeartbeatCreation)
+        {
+            _heartbeatCreationEntered = heartbeatCreationEntered;
+            _releaseHeartbeatCreation = releaseHeartbeatCreation;
+        }
+
+        public ICollection<string> GetSupportedBeginStrings() => _inner.GetSupportedBeginStrings();
+
+        public Message Create(string beginString, string msgType)
+        {
+            if (msgType == QuickFix.Fields.MsgType.HEARTBEAT)
+            {
+                _heartbeatCreationEntered.Set();
+                _releaseHeartbeatCreation.Wait();
+            }
+
+            return _inner.Create(beginString, msgType);
+        }
+
+        public Message Create(string beginString, QuickFix.Fields.ApplVerID applVerId, string msgType) =>
+            _inner.Create(beginString, applVerId, msgType);
+
+        public Group? Create(string beginString, string msgType, int groupCounterTag) =>
+            _inner.Create(beginString, msgType, groupCounterTag);
     }
 
     private sealed class GatedConnectionTypeComparer : IEqualityComparer<string>
@@ -345,6 +382,24 @@ public class SocketInitiatorLifecycleTests
         }
     }
 
+    private sealed class ThrowingDisposeStore : MemoryStore
+    {
+        protected override void Dispose(bool disposing)
+        {
+            if (disposing)
+                throw new InvalidOperationException("dispose failed");
+            base.Dispose(disposing);
+        }
+    }
+
+    private sealed class ThrowingFirstStoreFactory : IMessageStoreFactory
+    {
+        private int _created;
+
+        public IMessageStore Create(SessionID sessionId) =>
+            Interlocked.Increment(ref _created) == 1 ? new ThrowingDisposeStore() : new MemoryStore();
+    }
+
     private sealed class NoConnectionSocketInitiator : SocketInitiator
     {
         public NoConnectionSocketInitiator(SessionSettings settings, IMessageStoreFactory storeFactory)
@@ -561,6 +616,16 @@ public class SocketInitiatorLifecycleTests
             generated.Export(X509ContentType.Pfx), password: null, X509KeyStorageFlags.Exportable);
     }
 
+    private static void SendToInitiator(NetworkStream stream, Message message, int sequenceNumber)
+    {
+        message.Header.SetField(new QuickFix.Fields.SenderCompID("INIT_TARGET"));
+        message.Header.SetField(new QuickFix.Fields.TargetCompID("INIT_SENDER"));
+        message.Header.SetField(new QuickFix.Fields.MsgSeqNum((ulong)sequenceNumber));
+        message.Header.SetField(new QuickFix.Fields.SendingTime(DateTime.UtcNow));
+        byte[] bytes = Encoding.ASCII.GetBytes(message.ConstructString());
+        stream.Write(bytes);
+    }
+
     [Test]
     public void StopWhileConnectionSetupIsBlockedRejectsItsLateStream()
     {
@@ -723,6 +788,98 @@ public class SocketInitiatorLifecycleTests
             releaseRemove.Set();
             remover?.Join(5000);
         }
+    }
+
+    [Test]
+    public void RemoveSessionRetainsReservationUntilTimedOutReaderActuallyExits()
+    {
+        using var listener = new TcpListener(IPAddress.Loopback, 0);
+        listener.Start();
+        int port = ((IPEndPoint)listener.LocalEndpoint).Port;
+        using var heartbeatCreationEntered = new ManualResetEventSlim();
+        using var releaseHeartbeatCreation = new ManualResetEventSlim();
+        SessionSettings settings = InitiatorSettings(port);
+        var sessionId = new SessionID("FIX.4.2", "INIT_SENDER", "INIT_TARGET");
+        SettingsDictionary sessionSettings = settings.Get(sessionId);
+        sessionSettings.SetString("FPSimHmacSecret", "generation-secret");
+        var application = new SettingsReadingApplication(settings);
+        var messageFactory = new GatedHeartbeatMessageFactory(
+            heartbeatCreationEntered, releaseHeartbeatCreation);
+        using var initiator = new SocketInitiator(
+            application, new MemoryStoreFactory(), settings, (ILogFactory?)new NullLogFactory(), messageFactory);
+        TcpClient? peer = null;
+        Thread? remover = null;
+        bool removed = false;
+
+        try
+        {
+            Task<TcpClient> accept = listener.AcceptTcpClientAsync();
+            initiator.Start();
+            Assert.That(accept.Wait(5000), Is.True, "the old generation should establish its socket");
+            peer = accept.Result;
+            NetworkStream peerStream = peer.GetStream();
+            SendToInitiator(
+                peerStream,
+                new QuickFix.FIX42.Logon(
+                    new QuickFix.Fields.EncryptMethod(0), new QuickFix.Fields.HeartBtInt(30)),
+                sequenceNumber: 1);
+            Assert.That(application.LoggedOn.Wait(5000), Is.True,
+                "the old generation should complete logon before the gated callback");
+            SendToInitiator(
+                peerStream,
+                new QuickFix.FIX42.TestRequest(new QuickFix.Fields.TestReqID("quiescence")),
+                sequenceNumber: 2);
+            Assert.That(heartbeatCreationEntered.Wait(5000), Is.True,
+                "the old reader should pause after activation and before heartbeat ToAdmin");
+
+            remover = new Thread(() => removed = initiator.RemoveSession(sessionId, terminateActiveSession: true));
+            remover.Start();
+            Assert.That(remover.Join(5000), Is.True,
+                "removal should retain its established bounded-return behavior when the reader does not exit");
+            Assert.That(removed, Is.True);
+            Assert.That(settings.Has(sessionId), Is.True,
+                "old-generation settings must remain available until its reader actually exits");
+            Assert.That(initiator.AddSession(sessionId, sessionSettings), Is.False,
+                "replacement admission must remain reserved while an old-generation admin callback can still run");
+
+            application.ToAdminCalled.Reset();
+            releaseHeartbeatCreation.Set();
+            Assert.That(application.ToAdminCalled.Wait(5000), Is.True,
+                "the old-generation callback should finish with its retained settings");
+            Assert.That(application.ObservedHmacSecret, Is.EqualTo("generation-secret"));
+            Assert.That(SpinWait.SpinUntil(() => !settings.Has(sessionId), 5000), Is.True,
+                "actual reader exit should detach the old settings and release removal");
+            Assert.That(initiator.AddSession(sessionId, sessionSettings), Is.True,
+                "replacement admission should succeed after actual reader exit");
+            Assert.That(Session.LookupSession(sessionId), Is.Not.Null);
+        }
+        finally
+        {
+            releaseHeartbeatCreation.Set();
+            remover?.Join(5000);
+            peer?.Dispose();
+            listener.Stop();
+        }
+    }
+
+    [Test]
+    public void RemoveSessionReleasesSettingsAndReservationWhenDisposalThrows()
+    {
+        SessionSettings settings = InitiatorSettings();
+        var sessionId = new SessionID("FIX.4.2", "INIT_SENDER", "INIT_TARGET");
+        SettingsDictionary sessionSettings = settings.Get(sessionId);
+        using var initiator = new NoConnectionSocketInitiator(settings, new ThrowingFirstStoreFactory());
+
+        initiator.Start();
+
+        Assert.That(
+            () => initiator.RemoveSession(sessionId, terminateActiveSession: true),
+            Throws.TypeOf<InvalidOperationException>().With.Message.EqualTo("dispose failed"));
+        Assert.That(settings.Has(sessionId), Is.False,
+            "failed disposal must still detach settings owned by the removed generation");
+        Assert.That(initiator.AddSession(sessionId, sessionSettings), Is.True,
+            "failed disposal must still release the same-ID removal reservation");
+        Assert.That(Session.LookupSession(sessionId), Is.Not.Null);
     }
 
     [Test]

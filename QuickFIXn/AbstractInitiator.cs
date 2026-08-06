@@ -219,23 +219,39 @@ public abstract class AbstractInitiator : IInitiator
         if (disconnectRequired)
             session?.Disconnect("Dynamic session removal");
         OnRemove(sessionId); // ensure session's reader thread is gone before we dispose session
-        session?.Dispose();
-        // FP Enhancement: 2026-08-06 — detach only the settings captured by this generation. A
-        // same-ID replacement inserted while a missing-session removal was quiescing must survive.
-        lock (_settings)
+
+        void CompleteRemoval()
         {
-            lock (_sync)
+            try
             {
-                if (sessionSettings is not null
-                    && _settings.Has(sessionId)
-                    && ReferenceEquals(_settings.Get(sessionId), sessionSettings))
-                    _settings.Remove(sessionId);
-                _removing.Remove(sessionId);
+                session?.Dispose();
+            }
+            finally
+            {
+                // FP Enhancement: 2026-08-06 — detach only the settings captured by this generation. A
+                // same-ID replacement inserted while a missing-session removal was quiescing must survive.
+                lock (_settings)
+                {
+                    lock (_sync)
+                    {
+                        if (sessionSettings is not null
+                            && _settings.Has(sessionId)
+                            && ReferenceEquals(_settings.Get(sessionId), sessionSettings))
+                            _settings.Remove(sessionId);
+                        _removing.Remove(sessionId);
+                    }
+                }
             }
         }
 
+        // A transport whose bounded shutdown returned before its old worker exited owns completion.
+        if (!TryDeferRemovalUntilQuiesced(sessionId, CompleteRemoval))
+            CompleteRemoval();
+
         return true;
     }
+
+    internal virtual bool TryDeferRemovalUntilQuiesced(SessionID sessionId, Action completion) => false;
 
     /// <summary>
     /// Logout existing session and close connection.  Attempt graceful disconnect first.
