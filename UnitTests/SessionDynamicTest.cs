@@ -120,7 +120,7 @@ public class SessionDynamicTest
         }
     }
 
-    private void StartEngine(bool initiator, bool twoSessions = false)
+    private void StartEngine(bool initiator, bool twoSessions = false, int reconnectInterval = 1)
     {
         TestApplication application = new TestApplication(LogonCallback, LogoffCallback);
         IMessageStoreFactory storeFactory = new MemoryStoreFactory();
@@ -140,7 +140,7 @@ public class SessionDynamicTest
 
         if (initiator)
         {
-            defaults.SetString(SessionSettings.RECONNECT_INTERVAL, "1");
+            defaults.SetString(SessionSettings.RECONNECT_INTERVAL, reconnectInterval.ToString());
             settings.Set(CreateSessionId(StaticInitiatorCompId), CreateSessionConfig(true));
             _initiator = new SocketInitiator(application, storeFactory, settings, logFactory);
             _initiator.Start();
@@ -535,6 +535,26 @@ public class SessionDynamicTest
         }
         Assert.That(portReleased, Is.True,
             "Port was still accepting connections after its last session was removed");
+    }
+
+    [Test]
+    public void DynamicInitiatorConnectsWithoutWaitingForReconnectInterval()
+    {
+        StartListener();
+        StartEngine(true, reconnectInterval: 60);
+        if (_initiator is null)
+            throw new AssertionException("_initiator is null");
+
+        Assert.That(WaitForLogonMessage(StaticInitiatorCompId), Is.True,
+            "Failed to get logon message for static initiator session");
+
+        const string dynamicCompId = "ini10";
+        var sessionId = CreateSessionId(dynamicCompId);
+        Assert.That(_initiator.AddSession(sessionId, CreateSessionConfig(true)), Is.True,
+            "Failed to add dynamic session to initiator");
+
+        Assert.That(WaitForLogonMessage(dynamicCompId), Is.True,
+            "Dynamic initiator waited for the reconnect interval before connecting");
     }
 
     [Test]

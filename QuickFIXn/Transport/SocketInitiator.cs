@@ -23,6 +23,9 @@ public class SocketInitiator : AbstractInitiator
     private readonly Dictionary<SessionID, SocketInitiatorThread> _threads = new();
     private readonly Dictionary<SessionID, int> _sessionToHostNum = new();
     private readonly object _sync = new();
+    // FP Enhancement: 2026-08-06 — wake the worker for dynamic sessions while preserving established retry pacing.
+    private readonly object _connectRequestSync = new();
+    private readonly Queue<SessionID> _connectRequests = new();
     private readonly ILogger _nonSessionLog;
 
     public SocketInitiator(
@@ -189,6 +192,19 @@ public class SocketInitiator : AbstractInitiator
         {
             try
             {
+                while (true)
+                {
+                    SessionID sessionId;
+                    lock (_connectRequestSync)
+                    {
+                        if (_connectRequests.Count == 0)
+                            break;
+                        sessionId = _connectRequests.Dequeue();
+                    }
+
+                    Connect(sessionId);
+                }
+
                 double reconnectIntervalAsMilliseconds = 1000.0 * _reconnectInterval;
                 DateTime nowDt = DateTime.UtcNow;
 
@@ -203,7 +219,20 @@ public class SocketInitiator : AbstractInitiator
                 _nonSessionLog.Log(LogLevel.Error, e, "Failed to start: {Message}", e.Message);
             }
 
-            Thread.Sleep(1 * 1000);
+            lock (_connectRequestSync)
+            {
+                if (!_shutdownRequested && _connectRequests.Count == 0)
+                    Monitor.Wait(_connectRequestSync, 1000);
+            }
+        }
+    }
+
+    protected override void OnAdd(SessionID sessionId)
+    {
+        lock (_connectRequestSync)
+        {
+            _connectRequests.Enqueue(sessionId);
+            Monitor.Pulse(_connectRequestSync);
         }
     }
 
@@ -224,6 +253,8 @@ public class SocketInitiator : AbstractInitiator
     protected override void OnStop()
     {
         _shutdownRequested = true;
+        lock (_connectRequestSync)
+            Monitor.PulseAll(_connectRequestSync);
     }
 
     protected override void DoConnect(Session session, SettingsDictionary settings)
