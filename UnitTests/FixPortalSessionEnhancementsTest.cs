@@ -72,7 +72,6 @@ public class FixPortalRejectionCallbackTest
         _sessionId = new SessionID("FIX.4.2", "RJ_SENDER", "RJ_TARGET");
 
         var config = new SettingsDictionary();
-        config.SetBool(SessionSettings.PERSIST_MESSAGES, true);
         config.SetString(SessionSettings.CONNECTION_TYPE, "acceptor");
         config.SetString(SessionSettings.START_TIME, "00:00:00");
         config.SetString(SessionSettings.END_TIME, "00:00:00");
@@ -82,6 +81,7 @@ public class FixPortalRejectionCallbackTest
             new DataDictionaryProvider(), new SessionSchedule(config), 0, logFactory,
             new DefaultMessageFactory(), "blah");
         _session.SetResponder(_responder);
+        _session.PersistMessages = true;
         _session.CheckLatency = false;
         _seq = 1;
 
@@ -303,7 +303,8 @@ public class FixPortalRejectionCallbackTest
             System.Threading.Monitor.Exit(_sessionSync);
             OuterSessionLockRetained = System.Threading.Monitor.IsEntered(_sessionSync);
             SyncReleased.Set();
-            AllowSendReturn.Wait();
+            Assert.That(AllowSendReturn.Wait(TimeSpan.FromSeconds(10)), Is.True,
+                "the test must release the blocked resend");
             System.Threading.Monitor.Enter(_sessionSync);
             return true;
         }
@@ -342,19 +343,24 @@ public class FixPortalRejectionCallbackTest
         _session.SetResponder(responder);
 
         var resendTask = System.Threading.Tasks.Task.Run(() => RequestResend(sequenceNumber));
-        responder.SendStarted.Wait();
+        Assert.That(responder.SendStarted.Wait(TimeSpan.FromSeconds(10)), Is.True,
+            "the resend must reach the responder");
 
         var disconnectTask = System.Threading.Tasks.Task.Run(() =>
         {
             disconnectStarted.Set();
             _session.Disconnect("concurrent resend lifecycle boundary");
         });
-        disconnectStarted.Wait();
+        Assert.That(disconnectStarted.Wait(TimeSpan.FromSeconds(10)), Is.True,
+            "the disconnect task must start");
 
-        responder.SyncReleased.Wait();
+        Assert.That(responder.SyncReleased.Wait(TimeSpan.FromSeconds(10)), Is.True,
+            "the responder must expose the recursive lock state");
         responder.AllowSendReturn.Set();
-        resendTask.GetAwaiter().GetResult();
-        disconnectTask.GetAwaiter().GetResult();
+        Assert.That(resendTask.Wait(TimeSpan.FromSeconds(10)), Is.True,
+            "the resend task must complete");
+        Assert.That(disconnectTask.Wait(TimeSpan.FromSeconds(10)), Is.True,
+            "the disconnect task must complete");
 
         Assert.That(responder.OuterSessionLockRetained, Is.True,
             "resend send and record must retain the session lock as one lifecycle operation");
