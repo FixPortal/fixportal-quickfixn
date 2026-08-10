@@ -34,12 +34,14 @@ public class Session : IDisposable
     // FP Enhancement: verbatim wire-frame tap for the engine Tier-2 capture seam (null when not wired). See IFixWireTap.
     private readonly IFixWireTap? _wireTap;
     private readonly System.Collections.Concurrent.ConcurrentDictionary<(bool Outbound, ulong Seq), (int LogId, DateTime CaptureTime)> _resentTracker = new();
+    // FP Enhancement: 2026-08-10 — retain successful outbound retransmissions so session Reject callbacks can distinguish replayed frames from first transmissions.
     private readonly object _resentOutboundHistorySync = new();
     private readonly HashSet<SeqNumType> _resentOutboundHistory = [];
     private readonly Queue<SeqNumType> _resentOutboundHistoryOrder = [];
 
     private const LogLevel MessagesLogLevel = LogLevel.Information;
 
+    // FP Enhancement: 2026-08-10 — bound resend history per session so long-lived connections cannot grow it without limit.
     /// <summary>
     /// Maximum number of successfully retransmitted outbound sequence numbers retained per session.
     /// The 1,024-entry FIFO bound prevents long-lived sessions from growing without limit.
@@ -482,6 +484,7 @@ public class Session : IDisposable
             TapInboundQueueCleared();
             // Drop the LogExtended resend-correlation cache; its seqnum keys are recycled next session.
             _resentTracker.Clear();
+            // FP Enhancement: 2026-08-10 — drop resend history when sequence numbers may be recycled after disconnect.
             ClearResentOutboundHistory();
             _state.LogoutReason = "";
             if (ResetOnDisconnect)
@@ -869,6 +872,7 @@ public class Session : IDisposable
             {
                 _state.Reset("Reset requested by counterparty");
                 _resentTracker.Clear();
+                // FP Enhancement: 2026-08-10 — drop resend history before the peer reuses sequence numbers.
                 ClearResentOutboundHistory();
             }
         }
@@ -877,6 +881,7 @@ public class Session : IDisposable
         {
             _state.Reset("ResetOnLogon");
             _resentTracker.Clear();
+            // FP Enhancement: 2026-08-10 — drop resend history before acceptor logon reset reuses sequence numbers.
             ClearResentOutboundHistory();
         }
         if (RefreshOnLogon)
@@ -996,6 +1001,7 @@ public class Session : IDisposable
                         {
                             GenerateSequenceReset(resendReq, begin, msgSeqNum);
                         }
+                        // FP Enhancement: 2026-08-10 — only successful replay sends qualify a later Reject as referencing a resent outbound frame.
                         if (Send(msg.ConstructString()))
                             RecordResentOutbound(msgSeqNum);
                         // FP Enhancement: 2026-06-08 — mirror the outbound LogExtended hook for replayed messages. The resend path sends via Send(string), bypassing SendRaw where LogExtended is invoked, so tracked resent application messages were missing from the extended XML/JSON audit stream. (LogExtended itself skips admin message types.)
@@ -1789,6 +1795,7 @@ public class Session : IDisposable
             {
                 // FP Enhancement: 2026-06-08 — read RefSeqNum as ulong (GetULong) rather than narrowing a 64-bit sequence number through 32-bit int, which truncated above int.MaxValue.
                 SeqNumType refSeqNum = rejectMessage.GetULong(Tags.RefSeqNum);
+                // FP Enhancement: 2026-08-10 — surface whether RefSeqNum identifies a successful outbound retransmission without changing original-message reconstruction.
                 referencedMessageWasResent = WasResentOutbound(refSeqNum);
                 var messages = new List<string>();
                 _state.Get(refSeqNum, refSeqNum, messages);
@@ -1800,6 +1807,7 @@ public class Session : IDisposable
                 }
             }
 
+            // FP Enhancement: 2026-08-10 — pass the explicit resend signal through the source-compatible rejection callback overload.
             ((IApplicationMessageRejection)Application).OnMessageRejected(
                 rejectMessage, originalMessage, SessionID, reason, referencedMessageWasResent);
         }
@@ -1809,6 +1817,7 @@ public class Session : IDisposable
         }
     }
 
+    // FP Enhancement: 2026-08-10 — bounded FIFO resend-history operations share one lock to keep membership and eviction consistent.
     private void RecordResentOutbound(SeqNumType msgSeqNum)
     {
         lock (_resentOutboundHistorySync)
