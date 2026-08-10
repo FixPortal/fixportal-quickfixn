@@ -28,7 +28,7 @@ public interface IApplicationMessageRejection
     /// <param name="originalMessage">The original sent message that was rejected, if retrievable from the message store; null otherwise</param>
     /// <param name="sessionId">The session on which the reject was received</param>
     /// <param name="reason">The reject reason text</param>
-    /// <param name="referencedMessageWasResent">Whether the message identified by RefSeqNum was successfully retransmitted during this session</param>
+    /// <param name="referencedMessageWasResent">True when RefSeqNum is among the most recent 1,024 distinct successful retransmissions since the last lifecycle clear; false when it was never resent or has been evicted</param>
     void OnMessageRejected(
         Message rejectMessage,
         Message? originalMessage,

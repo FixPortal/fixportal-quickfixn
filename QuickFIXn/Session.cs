@@ -1001,9 +1001,12 @@ public class Session : IDisposable
                         {
                             GenerateSequenceReset(resendReq, begin, msgSeqNum);
                         }
-                        // FP Enhancement: 2026-08-10 — only successful replay sends qualify a later Reject as referencing a resent outbound frame.
-                        if (Send(msg.ConstructString()))
-                            RecordResentOutbound(msgSeqNum);
+                        // FP Enhancement: 2026-08-10 — retain the session lock across successful replay send and history recording so a lifecycle clear cannot be followed by a stale record.
+                        lock (_sync)
+                        {
+                            if (Send(msg.ConstructString()))
+                                RecordResentOutbound(msgSeqNum);
+                        }
                         // FP Enhancement: 2026-06-08 — mirror the outbound LogExtended hook for replayed messages. The resend path sends via Send(string), bypassing SendRaw where LogExtended is invoked, so tracked resent application messages were missing from the extended XML/JSON audit stream. (LogExtended itself skips admin message types.)
                         LogExtended(msg, msg.Header.GetString(Tags.MsgType), isOutbound: true);
                         begin = 0;
@@ -1817,32 +1820,41 @@ public class Session : IDisposable
         }
     }
 
-    // FP Enhancement: 2026-08-10 — bounded FIFO resend-history operations share one lock to keep membership and eviction consistent.
+    // FP Enhancement: 2026-08-10 — serialize bounded FIFO history operations behind the session lock, then the history lock, so lifecycle clears cannot race resend recording.
     private void RecordResentOutbound(SeqNumType msgSeqNum)
     {
-        lock (_resentOutboundHistorySync)
+        lock (_sync)
         {
-            if (!_resentOutboundHistory.Add(msgSeqNum))
-                return;
+            lock (_resentOutboundHistorySync)
+            {
+                if (!_resentOutboundHistory.Add(msgSeqNum))
+                    return;
 
-            _resentOutboundHistoryOrder.Enqueue(msgSeqNum);
-            if (_resentOutboundHistoryOrder.Count > ResentOutboundHistoryCapacity)
-                _resentOutboundHistory.Remove(_resentOutboundHistoryOrder.Dequeue());
+                _resentOutboundHistoryOrder.Enqueue(msgSeqNum);
+                if (_resentOutboundHistoryOrder.Count > ResentOutboundHistoryCapacity)
+                    _resentOutboundHistory.Remove(_resentOutboundHistoryOrder.Dequeue());
+            }
         }
     }
 
     private bool WasResentOutbound(SeqNumType msgSeqNum)
     {
-        lock (_resentOutboundHistorySync)
-            return _resentOutboundHistory.Contains(msgSeqNum);
+        lock (_sync)
+        {
+            lock (_resentOutboundHistorySync)
+                return _resentOutboundHistory.Contains(msgSeqNum);
+        }
     }
 
     private void ClearResentOutboundHistory()
     {
-        lock (_resentOutboundHistorySync)
+        lock (_sync)
         {
-            _resentOutboundHistory.Clear();
-            _resentOutboundHistoryOrder.Clear();
+            lock (_resentOutboundHistorySync)
+            {
+                _resentOutboundHistory.Clear();
+                _resentOutboundHistoryOrder.Clear();
+            }
         }
     }
 
