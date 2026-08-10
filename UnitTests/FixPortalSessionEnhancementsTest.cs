@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using NUnit.Framework;
 using QuickFix;
 using QuickFix.Fields;
@@ -21,13 +22,28 @@ public class FixPortalRejectionCallbackTest
         public Message? Reject;
         public Message? Original;
         public string? Reason;
+        public bool? ReferencedMessageWasResent;
+        public List<bool> ResentSignals = new();
 
         public void OnMessageRejected(Message rejectMessage, Message? originalMessage, SessionID sessionId, string reason)
+            => Capture(rejectMessage, originalMessage, reason, false);
+
+        public void OnMessageRejected(
+            Message rejectMessage,
+            Message? originalMessage,
+            SessionID sessionId,
+            string reason,
+            bool referencedMessageWasResent)
+            => Capture(rejectMessage, originalMessage, reason, referencedMessageWasResent);
+
+        private void Capture(Message rejectMessage, Message? originalMessage, string reason, bool referencedMessageWasResent)
         {
             Calls++;
             Reject = rejectMessage;
             Original = originalMessage;
             Reason = reason;
+            ReferencedMessageWasResent = referencedMessageWasResent;
+            ResentSignals.Add(referencedMessageWasResent);
         }
 
         public void ToAdmin(Message message, SessionID sessionId) { }
@@ -56,7 +72,7 @@ public class FixPortalRejectionCallbackTest
         _sessionId = new SessionID("FIX.4.2", "RJ_SENDER", "RJ_TARGET");
 
         var config = new SettingsDictionary();
-        config.SetBool(SessionSettings.PERSIST_MESSAGES, false);
+        config.SetBool(SessionSettings.PERSIST_MESSAGES, true);
         config.SetString(SessionSettings.CONNECTION_TYPE, "acceptor");
         config.SetString(SessionSettings.START_TIME, "00:00:00");
         config.SetString(SessionSettings.END_TIME, "00:00:00");
@@ -76,12 +92,39 @@ public class FixPortalRejectionCallbackTest
         _session.Next(logon.ConstructString());
     }
 
-    private void StampInbound(Message msg)
+    private void StampInbound(Message msg, SeqNumType? sequenceNumber = null)
     {
         msg.Header.SetField(new TargetCompID(_sessionId.SenderCompID));
         msg.Header.SetField(new SenderCompID(_sessionId.TargetCompID));
-        msg.Header.SetField(new MsgSeqNum(_seq++));
+        var sequence = sequenceNumber ?? _seq;
+        msg.Header.SetField(new MsgSeqNum(sequence));
         msg.Header.SetField(new SendingTime(DateTime.UtcNow));
+        _seq = sequence + 1;
+    }
+
+    private SeqNumType SendPersistedOrder(string clOrdId)
+    {
+        var order = new QuickFix.FIX42.NewOrderSingle(
+            new ClOrdID(clOrdId), new HandlInst(HandlInst.MANUAL_ORDER), new Symbol("IBM"),
+            new Side(Side.BUY), new TransactTime(), new OrdType(OrdType.MARKET));
+
+        Assert.That(_session.Send(order), Is.True, "the original outbound application message should be sent");
+        return order.Header.GetULong(Tags.MsgSeqNum);
+    }
+
+    private void RequestResend(SeqNumType sequenceNumber)
+    {
+        var resendRequest = new QuickFix.FIX42.ResendRequest(
+            new BeginSeqNo(sequenceNumber), new EndSeqNo(sequenceNumber));
+        StampInbound(resendRequest);
+        _session.Next(resendRequest.ConstructString());
+    }
+
+    private void ReceiveReject(SeqNumType referencedSequenceNumber)
+    {
+        var reject = new QuickFix.FIX42.Reject(new RefSeqNum(referencedSequenceNumber));
+        StampInbound(reject);
+        _session.Next(reject.ConstructString());
     }
 
     [Test]
@@ -109,6 +152,118 @@ public class FixPortalRejectionCallbackTest
 
         Assert.That(_app.Calls, Is.EqualTo(1));
         Assert.That(_app.Reason, Is.EqualTo("Session-level reject received"));
+    }
+
+    [Test]
+    public void InboundReject_OfResentOutboundFrame_IsMarkedResent()
+    {
+        var sequenceNumber = SendPersistedOrder("RESENT-1");
+        RequestResend(sequenceNumber);
+        ReceiveReject(sequenceNumber);
+
+        Assert.That(_app.ReferencedMessageWasResent, Is.True);
+        Assert.That(_app.Original, Is.Not.Null);
+        Assert.That(_app.Original!.Header.IsSetField(Tags.PossDupFlag), Is.False,
+            "the reconstructed original must remain the pre-resend stored frame");
+    }
+
+    [Test]
+    public void InboundReject_OfFirstTransmission_IsNotMarkedResent()
+    {
+        var sequenceNumber = SendPersistedOrder("FIRST-TRANSMISSION");
+        ReceiveReject(sequenceNumber);
+
+        Assert.That(_app.ReferencedMessageWasResent, Is.False);
+    }
+
+    [Test]
+    public void ResentOutboundHistory_EvictsTheOldestSequenceNumber()
+    {
+        SeqNumType oldestSequenceNumber = 0;
+        SeqNumType newestSequenceNumber = 0;
+
+        for (var i = 0; i <= Session.ResentOutboundHistoryCapacity; i++)
+        {
+            var sequenceNumber = SendPersistedOrder($"FIFO-{i}");
+            RequestResend(sequenceNumber);
+
+            if (i == 0)
+                oldestSequenceNumber = sequenceNumber;
+            newestSequenceNumber = sequenceNumber;
+        }
+
+        ReceiveReject(oldestSequenceNumber);
+        ReceiveReject(newestSequenceNumber);
+
+        Assert.That(_app.ResentSignals[^2], Is.False);
+        Assert.That(_app.ResentSignals[^1], Is.True);
+    }
+
+    [Test]
+    public void ResentOutboundHistory_IsClearedOnDisconnect()
+    {
+        var sequenceNumber = SendPersistedOrder("DISCONNECT");
+        RequestResend(sequenceNumber);
+
+        _session.Disconnect("test recyclable sequence boundary");
+        _session.SetResponder(_responder);
+        var logon = new QuickFix.FIX42.Logon();
+        StampInbound(logon);
+        logon.SetField(new HeartBtInt(1));
+        _session.Next(logon.ConstructString());
+        ReceiveReject(sequenceNumber);
+
+        Assert.That(_app.ReferencedMessageWasResent, Is.False);
+    }
+
+    [Test]
+    public void ResentOutboundHistory_IsClearedWhenPeerResetsSequenceNumbers()
+    {
+        var sequenceNumber = SendPersistedOrder("PEER-RESET");
+        RequestResend(sequenceNumber);
+
+        var resetLogon = new QuickFix.FIX42.Logon();
+        resetLogon.SetField(new HeartBtInt(1));
+        resetLogon.SetField(new ResetSeqNumFlag(true));
+        StampInbound(resetLogon, 1);
+        _session.Next(resetLogon.ConstructString());
+        ReceiveReject(sequenceNumber);
+
+        Assert.That(_app.ReferencedMessageWasResent, Is.False);
+    }
+
+    [Test]
+    public void ResentOutboundHistory_IsClearedWhenAcceptorResetsOnLogon()
+    {
+        var sequenceNumber = SendPersistedOrder("ACCEPTOR-RESET");
+        RequestResend(sequenceNumber);
+
+        _session.ResetOnLogon = true;
+        var logon = new QuickFix.FIX42.Logon();
+        logon.SetField(new HeartBtInt(1));
+        StampInbound(logon, 1);
+        _session.Next(logon.ConstructString());
+        ReceiveReject(sequenceNumber);
+
+        Assert.That(_app.ReferencedMessageWasResent, Is.False);
+    }
+
+    [Test]
+    public void ResentOutboundHistory_DoesNotRecordFailedResends()
+    {
+        var sequenceNumber = SendPersistedOrder("FAILED-RESEND");
+        _session.SetResponder(new FailingResponder());
+        RequestResend(sequenceNumber);
+        _session.SetResponder(_responder);
+        ReceiveReject(sequenceNumber);
+
+        Assert.That(_app.ReferencedMessageWasResent, Is.False);
+    }
+
+    private sealed class FailingResponder : IResponder
+    {
+        public bool Send(string message) => false;
+        public void Disconnect() { }
     }
 }
 
