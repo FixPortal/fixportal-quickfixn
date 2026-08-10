@@ -18,4 +18,22 @@ public interface IApplicationMessageRejection
     /// <param name="sessionId">The session on which the reject was received</param>
     /// <param name="reason">The reject reason text</param>
     void OnMessageRejected(Message rejectMessage, Message? originalMessage, SessionID sessionId, string reason);
+
+    // FP Enhancement: 2026-08-10 — expose whether the referenced outbound message was successfully retransmitted while keeping existing four-argument implementers source-compatible through the default body.
+    /// <summary>
+    /// Called when a session-level Reject is received from the counterparty,
+    /// indicating that a message we sent was rejected.
+    /// </summary>
+    /// <param name="rejectMessage">The inbound Reject message (msgtype 3) containing RefSeqNum, Text, etc.</param>
+    /// <param name="originalMessage">The original sent message that was rejected, if retrievable from the message store; null otherwise</param>
+    /// <param name="sessionId">The session on which the reject was received</param>
+    /// <param name="reason">The reject reason text</param>
+    /// <param name="referencedMessageWasResent">Whether the message identified by RefSeqNum was successfully retransmitted during this session</param>
+    void OnMessageRejected(
+        Message rejectMessage,
+        Message? originalMessage,
+        SessionID sessionId,
+        string reason,
+        bool referencedMessageWasResent)
+        => OnMessageRejected(rejectMessage, originalMessage, sessionId, reason);
 }
