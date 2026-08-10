@@ -265,6 +265,109 @@ public class FixPortalRejectionCallbackTest
         public bool Send(string message) => false;
         public void Disconnect() { }
     }
+
+    private sealed class LegacyRejectionCapturingApplication : IApplication, IApplicationMessageRejection
+    {
+        public int Calls;
+        public string? Reason;
+
+        public void OnMessageRejected(Message rejectMessage, Message? originalMessage, SessionID sessionId, string reason)
+        {
+            Calls++;
+            Reason = reason;
+        }
+
+        public void ToAdmin(Message message, SessionID sessionId) { }
+        public void FromAdmin(Message message, SessionID sessionId) { }
+        public void ToApp(Message message, SessionID sessionId) { }
+        public void FromApp(Message message, SessionID sessionId) { }
+        public void OnCreate(SessionID sessionId) { }
+        public void OnLogout(SessionID sessionId) { }
+        public void OnLogon(SessionID sessionId) { }
+    }
+
+    private sealed class LockYieldingResponder : IResponder, IDisposable
+    {
+        private readonly object _sessionSync;
+
+        public LockYieldingResponder(object sessionSync) => _sessionSync = sessionSync;
+
+        public System.Threading.ManualResetEventSlim SendStarted { get; } = new(false);
+        public System.Threading.ManualResetEventSlim SyncReleased { get; } = new(false);
+        public System.Threading.ManualResetEventSlim AllowSendReturn { get; } = new(false);
+        public bool OuterSessionLockRetained { get; private set; }
+
+        public bool Send(string message)
+        {
+            SendStarted.Set();
+            System.Threading.Monitor.Exit(_sessionSync);
+            OuterSessionLockRetained = System.Threading.Monitor.IsEntered(_sessionSync);
+            SyncReleased.Set();
+            AllowSendReturn.Wait();
+            System.Threading.Monitor.Enter(_sessionSync);
+            return true;
+        }
+
+        public void Disconnect() { }
+
+        public void Dispose()
+        {
+            SendStarted.Dispose();
+            SyncReleased.Dispose();
+            AllowSendReturn.Dispose();
+        }
+    }
+
+    private static object GetSessionSync(Session session)
+        => typeof(Session).GetField("_sync", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!.GetValue(session)!;
+
+    [Test]
+    public void FiveArgumentCallback_DefaultBody_DelegatesToLegacyImplementation()
+    {
+        var legacyApplication = new LegacyRejectionCapturingApplication();
+        IApplicationMessageRejection callback = legacyApplication;
+
+        callback.OnMessageRejected(new Message(), null, _sessionId, "legacy callback", referencedMessageWasResent: true);
+
+        Assert.That(legacyApplication.Calls, Is.EqualTo(1));
+        Assert.That(legacyApplication.Reason, Is.EqualTo("legacy callback"));
+    }
+
+    [Test]
+    public void ResentOutboundHistory_DisconnectAfterBlockedResend_ClearsRecordedSequenceNumber()
+    {
+        var sequenceNumber = SendPersistedOrder("RESEND-DISCONNECT-RACE");
+        using var responder = new LockYieldingResponder(GetSessionSync(_session));
+        using var disconnectStarted = new System.Threading.ManualResetEventSlim(false);
+        _session.SetResponder(responder);
+
+        var resendTask = System.Threading.Tasks.Task.Run(() => RequestResend(sequenceNumber));
+        responder.SendStarted.Wait();
+
+        var disconnectTask = System.Threading.Tasks.Task.Run(() =>
+        {
+            disconnectStarted.Set();
+            _session.Disconnect("concurrent resend lifecycle boundary");
+        });
+        disconnectStarted.Wait();
+
+        responder.SyncReleased.Wait();
+        responder.AllowSendReturn.Set();
+        resendTask.GetAwaiter().GetResult();
+        disconnectTask.GetAwaiter().GetResult();
+
+        Assert.That(responder.OuterSessionLockRetained, Is.True,
+            "resend send and record must retain the session lock as one lifecycle operation");
+
+        _session.SetResponder(_responder);
+        var logon = new QuickFix.FIX42.Logon();
+        logon.SetField(new HeartBtInt(1));
+        StampInbound(logon);
+        _session.Next(logon.ConstructString());
+        ReceiveReject(sequenceNumber);
+
+        Assert.That(_app.ReferencedMessageWasResent, Is.False);
+    }
 }
 
 [TestFixture]
