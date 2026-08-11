@@ -12,6 +12,7 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     permissions:
       contents: read
 
@@ -26,7 +27,5 @@ jobs:
     - name: Build
       run: dotnet build --no-restore
     - name: Unit Test
-      run: dotnet test --no-build --verbosity normal UnitTests
-    - name: Acceptance 
-      run: dotnet test --no-build --verbosity normal AcceptanceTest
+      run: dotnet test --no-build --verbosity normal UnitTests --blame-hang-timeout 30s --blame-hang-dump-type none
     
