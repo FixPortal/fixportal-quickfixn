@@ -1,4 +1,6 @@
-# Report-only mutation lane: 80/70 classify the score; break 0 keeps the score informational.
+# Report-only mutation lane over directly tested field converters. Full-engine Standard
+# mutation creates 6,387 mutants and exceeds the 45-minute extended-job ceiling.
+# Thresholds classify the score; break 0 keeps the score informational.
 name: mutation
 
 on:
