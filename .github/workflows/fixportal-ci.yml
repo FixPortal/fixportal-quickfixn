@@ -7,8 +7,10 @@ name: FixPortal CI
 on:
   push:
     branches: [ "fpsim" ]
+    tags: [ "v*" ]
   pull_request:
     branches: [ "fpsim" ]
+  workflow_dispatch:
 
 concurrency:
   group: fixportal-ci-${{ github.ref }}
@@ -33,7 +35,7 @@ jobs:
     - name: Setup .NET
       uses: actions/setup-dotnet@v6
       with:
-        dotnet-version: 8.0.x
+        dotnet-version: 10.0.x
     - name: Restore dependencies
       run: dotnet restore
     - name: Build
@@ -59,7 +61,7 @@ jobs:
     - name: Setup .NET
       uses: actions/setup-dotnet@v6
       with:
-        dotnet-version: 8.0.x
+        dotnet-version: 10.0.x
     - name: Pack
       run: dotnet pack QuickFIXn.sln -c Release -o _pkgout
     - name: Publish to GitHub Packages

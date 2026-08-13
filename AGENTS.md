@@ -47,6 +47,20 @@ are DDTool output. Change the dictionary and regenerate with
 next generation run. Flag direct edits there rather than reviewing them as
 ordinary source.
 
+## Scaffold exceptions
+
+This fork deliberately preserves upstream's .NET project layout to keep future
+`connamara/quickfixn` merges reviewable. It therefore retains `QuickFIXn.sln`
+instead of adding `.slnx`, does not add `Directory.Build.props`, a repository
+`.editorconfig`, CSharpier, or `FixPortal.CodeStyle`, keeps upstream's inline
+package versions instead of enabling central package management, does not add a
+`.csharpierignore`, and retains upstream's `*.cs text` rule instead of forcing
+`*.cs text eol=crlf`.
+
+Each exception avoids repo-wide churn or persistent conflicts in upstream-owned
+files. FixPortal-owned automation and dependencies may still be added locally
+when they do not rewrite the upstream tree.
+
 ## Contributing
 
 `CONTRIBUTING.md` is upstream's and describes contributing to
