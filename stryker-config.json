@@ -17,7 +17,12 @@
       "break": 0
     },
     "mutate": [
-      "**/*.cs"
+      "Fields/Converters/BoolConverter.cs",
+      "Fields/Converters/CharConverter.cs",
+      "Fields/Converters/CheckSumConverter.cs",
+      "Fields/Converters/DateTimeConverter.cs",
+      "Fields/Converters/DecimalConverter.cs",
+      "Fields/Converters/IntConverter.cs"
     ]
   }
 }
