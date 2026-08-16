@@ -22,6 +22,7 @@ public class SessionState : IDisposable
     private bool _sentLogout = false;
     private bool _sentReset = false;
     private string _logoutReason = "";
+    private string _lastDisconnectReason = "";
     private int _testRequestCounter = 0;
     private int _heartBtInt = 0;
     private int _heartBtIntAsMilliSecs = 0;
@@ -98,6 +99,14 @@ public class SessionState : IDisposable
     {
         get { lock (_sync) { return _logoutReason; } }
         set { lock (_sync) { _logoutReason = value; } }
+    }
+
+    // FP Enhancement: 2026-08-16 — carries the reason from Session.Disconnect so the
+    // application can distinguish an intentional logout from an unexpected drop.
+    public string LastDisconnectReason
+    {
+        get { lock (_sync) { return _lastDisconnectReason; } }
+        set { lock (_sync) { _lastDisconnectReason = value; } }
     }
 
     public int TestRequestCounter

@@ -398,3 +398,97 @@ public class FixPortalLogoutBeforeLogonTest : SessionTestBase
         Assert.That(SENT_LOGOUT(), Is.True, "a logout-before-logon should be answered with a Logout, not silently dropped");
     }
 }
+
+// FP Enhancement: 2026-08-16 — the application must be able to tell an intentional
+// logout from an unexpected drop. Session.Disconnect(reason) knows which it is; before
+// this enhancement it discarded the reason and IApplication.OnLogout saw nothing.
+// Both tests are revert-sensitive: remove the stamp and they fail.
+[TestFixture]
+public class FixPortalDisconnectReasonTest
+{
+    private sealed class ReasonCapturingApplication : IApplication
+    {
+        public Session? Session;
+        public int LogoutCalls;
+        public string? SeenDisconnectReason;
+        public string? SeenLogoutReason;
+
+        public void OnLogout(SessionID sessionId)
+        {
+            LogoutCalls++;
+            SeenDisconnectReason = Session?.LastDisconnectReason;
+            SeenLogoutReason = Session?.LogoutReason;
+        }
+
+        public void ToAdmin(Message message, SessionID sessionId) { }
+        public void FromAdmin(Message message, SessionID sessionId) { }
+        public void ToApp(Message message, SessionID sessionId) { }
+        public void FromApp(Message message, SessionID sessionId) { }
+        public void OnCreate(SessionID sessionId) { }
+        public void OnLogon(SessionID sessionId) { }
+    }
+
+    private ReasonCapturingApplication _app = new();
+    private SessionTestSupport.MockResponder _responder = new();
+    private SessionID _sessionId = new("FIX.4.2", "DR_SENDER", "DR_TARGET");
+    private Session _session = null!;
+
+    [TearDown]
+    public void TearDown() => _session?.Dispose();
+
+    [SetUp]
+    public void Setup()
+    {
+        _app = new ReasonCapturingApplication();
+        _responder = new SessionTestSupport.MockResponder();
+        _sessionId = new SessionID("FIX.4.2", "DR_SENDER", "DR_TARGET");
+
+        var config = new SettingsDictionary();
+        config.SetString(SessionSettings.CONNECTION_TYPE, "acceptor");
+        config.SetString(SessionSettings.START_TIME, "00:00:00");
+        config.SetString(SessionSettings.END_TIME, "00:00:00");
+
+        var logFactory = new LogFactoryAdapter(new NullLogFactory());
+        _session = new Session(false, _app, new MemoryStoreFactory(), _sessionId,
+            new DataDictionaryProvider(), new SessionSchedule(config), 0, logFactory,
+            new DefaultMessageFactory(), "blah");
+        _app.Session = _session;
+        _session.SetResponder(_responder);
+        _session.PersistMessages = true;
+        _session.CheckLatency = false;
+
+        // Bring the session up so Disconnect actually dispatches OnLogout
+        // (Session.cs guards it on ReceivedLogon || SentLogon).
+        var logon = new QuickFix.FIX42.Logon();
+        logon.Header.SetField(new TargetCompID(_sessionId.SenderCompID));
+        logon.Header.SetField(new SenderCompID(_sessionId.TargetCompID));
+        logon.Header.SetField(new MsgSeqNum(1));
+        logon.Header.SetField(new SendingTime(DateTime.UtcNow));
+        logon.SetField(new HeartBtInt(1));
+        _session.Next(logon.ConstructString());
+    }
+
+    [Test]
+    public void Disconnect_ExposesItsReasonToTheApplication()
+    {
+        Assume.That(_session.IsLoggedOn, Is.True, "session should be logged on after the setup logon");
+
+        _session.Disconnect("Timed out waiting for heartbeat");
+
+        Assert.That(_app.LogoutCalls, Is.EqualTo(1), "OnLogout should fire once for a logged-on session");
+        Assert.That(_app.SeenDisconnectReason, Is.EqualTo("Timed out waiting for heartbeat"),
+            "the application must see the engine's own disconnect reason during OnLogout");
+    }
+
+    [Test]
+    public void OperatorLogoutReason_IsStillVisibleDuringOnLogout()
+    {
+        Assume.That(_session.IsLoggedOn, Is.True, "session should be logged on after the setup logon");
+
+        _session.Logout("taken out of service by operator");
+        _session.Disconnect("Logout request");
+
+        Assert.That(_app.SeenLogoutReason, Is.EqualTo("taken out of service by operator"),
+            "LogoutReason is cleared only after OnLogout, so it must still be readable inside it");
+    }
+}

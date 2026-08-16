@@ -450,6 +450,14 @@ public class Session : IDisposable
         _state.LogoutReason = reason;
     }
 
+    // FP Enhancement: 2026-08-16 — read-only views of the two logout signals, for
+    // applications that classify why a session went down. LastDisconnectReason is why
+    // the socket was torn down; LogoutReason is non-empty only when Logout(reason) was
+    // called, i.e. the session was deliberately taken out of service.
+    public string LastDisconnectReason => _state.LastDisconnectReason;
+
+    public string LogoutReason => _state.LogoutReason;
+
     /// <summary>
     /// Logs out from session and closes the network connection
     /// </summary>
@@ -474,6 +482,11 @@ public class Session : IDisposable
             {
                 _state.ReceivedLogon = false;
                 _state.SentLogon = false;
+                // FP Enhancement: 2026-08-16 — surface the disconnect reason to the
+                // application so it can distinguish an intentional logout from a drop.
+                // Stamped before the callback; LogoutReason is not cleared until below,
+                // so both signals are readable from inside OnLogout.
+                _state.LastDisconnectReason = reason;
                 Application.OnLogout(SessionID);
             }
 
