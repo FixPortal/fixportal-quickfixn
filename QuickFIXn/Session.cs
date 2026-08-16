@@ -436,6 +436,10 @@ public class Session : IDisposable
     {
         _state.IsEnabled = true;
         _state.LogoutReason = "";
+        // FP Enhancement: 2026-08-16 — clear the previous incarnation's disconnect reason
+        // on logon, matching LogoutReason above. Without this, a freshly logged-on session
+        // would still report the prior connection's disconnect reason as if it were live.
+        _state.LastDisconnectReason = "";
     }
 
     /// <summary>
