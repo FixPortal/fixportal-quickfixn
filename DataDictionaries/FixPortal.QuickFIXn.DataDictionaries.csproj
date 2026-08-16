@@ -10,7 +10,7 @@
     <Description>FixPortal-customised QuickFIX/n FIX data dictionaries (the *_FP_QF.xml set plus stock support dictionaries), shipped as NuGet content under DataDictionary/.</Description>
     <Copyright>Copyright © 2011 - $([System.DateTime]::UtcNow.Year) QuickFIXn.org. All rights reserved.</Copyright>
     <Authors>Connamara Systems, LLC and QuickFIX/n contributors</Authors>
-    <Version>1.14.1-fixportal.5</Version>
+    <Version>1.14.1-fixportal.6</Version>
     <Platforms>AnyCPU;x64</Platforms>
     <PackageRequireLicenseAcceptance>true</PackageRequireLicenseAcceptance>
     <PackageLicenseFile>LICENSE</PackageLicenseFile>
