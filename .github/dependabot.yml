@@ -1,12 +1,59 @@
 version: 2
+
+registries:
+  # FixPortal.QuickFIXn.* packages are published to GitHub Packages, which requires a token
+  # even to read. This is a DEPENDABOT secret (Settings > Secrets > Dependabot) — Dependabot
+  # cannot read Actions secrets. FIXPORTAL_PACKAGES_TOKEN exists at ORG level with
+  # visibility=all, so an empty repo-level Dependabot secret list is expected.
+  fixportal-github-packages:
+    type: nuget-feed
+    url: https://nuget.pkg.github.com/FixPortal/index.json
+    username: FixPortal
+    password: ${{ secrets.FIXPORTAL_PACKAGES_TOKEN }}
+
 updates:
-- package-ecosystem: nuget
-  directory: "/"
-  schedule:
-    interval: weekly
-    time: "11:00"
-  open-pull-requests-limit: 10
-  ignore:
-  - dependency-name: Microsoft.NET.Test.Sdk
-    versions:
-    - 16.9.1
+  - package-ecosystem: nuget
+    directory: /
+    registries:
+      - fixportal-github-packages
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+      timezone: Europe/London
+    open-pull-requests-limit: 10
+    commit-message:
+      prefix: chore
+      include: scope
+    groups:
+      microsoft-extensions:
+        patterns: ["Microsoft.Extensions.*"]
+      aspnetcore:
+        patterns: ["Microsoft.AspNetCore.*"]
+      ef-core:
+        patterns: ["Microsoft.EntityFrameworkCore", "Microsoft.EntityFrameworkCore.*"]
+      xunit:
+        patterns: ["xunit", "xunit.*", "xunit.v3", "xunit.v3.*"]
+      testing:
+        patterns: ["NSubstitute", "NSubstitute.*", "AwesomeAssertions", "AwesomeAssertions.*", "Microsoft.NET.Test.Sdk", "coverlet.*"]
+      nodatime:
+        patterns: ["NodaTime", "NodaTime.*"]
+      serilog:
+        patterns: ["Serilog", "Serilog.*"]
+      azure-sdk:
+        patterns: ["Azure.*", "Microsoft.Azure.*"]
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+      timezone: Europe/London
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: ci
+      include: scope
+    groups:
+      actions:
+        patterns: ["*"]
