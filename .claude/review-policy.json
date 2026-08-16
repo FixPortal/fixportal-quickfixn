@@ -29,6 +29,7 @@
   "high": [
     ".claude/review-policy.json",
     ".coderabbit.yaml",
+    "nuget.config",
     "spec/**",
     "DataDictionaries/**",
     "DDTool/**",

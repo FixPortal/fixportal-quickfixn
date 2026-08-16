@@ -61,6 +61,13 @@ Each exception avoids repo-wide churn or persistent conflicts in upstream-owned
 files. FixPortal-owned automation and dependencies may still be added locally
 when they do not rewrite the upstream tree.
 
+Accepted permanent gate failure (owner decision, 2026-08-16):
+`dotnet format QuickFIXn.sln --verify-no-changes` fails with thousands of
+WHITESPACE errors. That is the direct, accepted consequence of the no-formatter
+exception above — upstream-merge reviewability trumps the format gate. Do not
+run a format pass to "fix" it and do not add an `.editorconfig`; no CI workflow
+in this fork runs a format gate, so nothing is permanently red over it.
+
 ## Contributing
 
 `CONTRIBUTING.md` is upstream's and describes contributing to
