@@ -436,10 +436,6 @@ public class Session : IDisposable
     {
         _state.IsEnabled = true;
         _state.LogoutReason = "";
-        // FP Enhancement: 2026-08-16 — clear the previous incarnation's disconnect reason
-        // on logon, matching LogoutReason above. Without this, a freshly logged-on session
-        // would still report the prior connection's disconnect reason as if it were live.
-        _state.LastDisconnectReason = "";
     }
 
     /// <summary>
@@ -1358,6 +1354,15 @@ public class Session : IDisposable
         lock (_sync)
         {
             _responder = responder;
+            // FP Enhancement: 2026-08-16 — clear the previous incarnation's disconnect
+            // reason on every fresh connection. SetResponder is the entry point both the
+            // acceptor (SocketReader.OnMessageFound) and the initiator
+            // (SocketInitiatorThread.Connect) call exactly once per new TCP connection,
+            // before any inbound message is processed — unlike Logon(), which only runs
+            // once at engine start (ThreadedSocketAcceptor.LogonAllSessions) and is never
+            // called again on reconnect. Without this, LastDisconnectReason would keep
+            // reporting the prior connection's reason for the life of the new one.
+            _state.LastDisconnectReason = "";
         }
     }
 

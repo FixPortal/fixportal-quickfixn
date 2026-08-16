@@ -492,10 +492,33 @@ public class FixPortalDisconnectReasonTest
             "LogoutReason is cleared only after OnLogout, so it must still be readable inside it");
     }
 
+    // FP Enhancement: 2026-08-16 — documents a known gap, not a fix: Logout() called with
+    // its default argument ("") is indistinguishable from Logout() never having been
+    // called at all — LogoutReason reads "" during OnLogout either way. Deliberate
+    // operator intent is not tracked independently of the reason string; this is
+    // upstream's pre-existing `Logout(string reason = "")` signature and is out of scope
+    // to change here. This test exists so a future change to that behaviour is caught.
+    [Test]
+    public void Logout_CalledWithDefaultArgument_LeavesLogoutReasonEmptyDuringOnLogout()
+    {
+        Assert.That(_session.IsLoggedOn, Is.True, "session should be logged on after the setup logon");
+
+        _session.Logout();
+        _session.Disconnect("Logout request");
+
+        Assert.That(_app.SeenLogoutReason, Is.EqualTo(""),
+            "Logout() with its default argument is currently indistinguishable from Logout() never being called");
+    }
+
     // FP Enhancement: 2026-08-16 — LastDisconnectReason must not leak across a reconnect;
     // a diagnostics reader on a freshly logged-on session must not see the previous
-    // incarnation's disconnect reason. Revert-sensitive: without clearing it in Logon(),
-    // this fails with the stale "first drop" reason still present.
+    // incarnation's disconnect reason. Revert-sensitive: without clearing it in
+    // SetResponder(), this fails with the stale "first drop" reason still present.
+    // SetResponder is the real reconnect entry point — it's what SocketReader
+    // (acceptor) and SocketInitiatorThread (initiator) both call on every fresh
+    // connection, before any inbound message is processed. Session.Logon() is NOT
+    // called on reconnect — it only runs once at engine start, so it is deliberately
+    // not exercised here.
     [Test]
     public void SecondLogon_ClearsThePreviousDisconnectReason()
     {
@@ -503,10 +526,6 @@ public class FixPortalDisconnectReasonTest
 
         _session.Disconnect("first drop");
         _session.SetResponder(_responder);
-        // Session.Logon() is the reconnect entry point (called by the acceptor on a fresh
-        // accept, e.g. ThreadedSocketAcceptor) — distinct from processing the inbound FIX
-        // Logon message below. LastDisconnectReason is cleared here, not by NextLogon.
-        _session.Logon();
 
         var logon = new QuickFix.FIX42.Logon();
         logon.Header.SetField(new TargetCompID(_sessionId.SenderCompID));
