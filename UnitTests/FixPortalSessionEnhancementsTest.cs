@@ -471,7 +471,7 @@ public class FixPortalDisconnectReasonTest
     [Test]
     public void Disconnect_ExposesItsReasonToTheApplication()
     {
-        Assume.That(_session.IsLoggedOn, Is.True, "session should be logged on after the setup logon");
+        Assert.That(_session.IsLoggedOn, Is.True, "session should be logged on after the setup logon");
 
         _session.Disconnect("Timed out waiting for heartbeat");
 
@@ -483,12 +483,69 @@ public class FixPortalDisconnectReasonTest
     [Test]
     public void OperatorLogoutReason_IsStillVisibleDuringOnLogout()
     {
-        Assume.That(_session.IsLoggedOn, Is.True, "session should be logged on after the setup logon");
+        Assert.That(_session.IsLoggedOn, Is.True, "session should be logged on after the setup logon");
 
         _session.Logout("taken out of service by operator");
         _session.Disconnect("Logout request");
 
         Assert.That(_app.SeenLogoutReason, Is.EqualTo("taken out of service by operator"),
             "LogoutReason is cleared only after OnLogout, so it must still be readable inside it");
+    }
+
+    // FP Enhancement: 2026-08-16 — LastDisconnectReason must not leak across a reconnect;
+    // a diagnostics reader on a freshly logged-on session must not see the previous
+    // incarnation's disconnect reason. Revert-sensitive: without clearing it in Logon(),
+    // this fails with the stale "first drop" reason still present.
+    [Test]
+    public void SecondLogon_ClearsThePreviousDisconnectReason()
+    {
+        Assert.That(_session.IsLoggedOn, Is.True, "session should be logged on after the setup logon");
+
+        _session.Disconnect("first drop");
+        _session.SetResponder(_responder);
+        // Session.Logon() is the reconnect entry point (called by the acceptor on a fresh
+        // accept, e.g. ThreadedSocketAcceptor) — distinct from processing the inbound FIX
+        // Logon message below. LastDisconnectReason is cleared here, not by NextLogon.
+        _session.Logon();
+
+        var logon = new QuickFix.FIX42.Logon();
+        logon.Header.SetField(new TargetCompID(_sessionId.SenderCompID));
+        logon.Header.SetField(new SenderCompID(_sessionId.TargetCompID));
+        logon.Header.SetField(new MsgSeqNum(2));
+        logon.Header.SetField(new SendingTime(DateTime.UtcNow));
+        logon.SetField(new HeartBtInt(1));
+        _session.Next(logon.ConstructString());
+
+        Assert.That(_session.IsLoggedOn, Is.True, "session should be logged on again after the second logon");
+        Assert.That(_session.LastDisconnectReason, Is.EqualTo(""),
+            "a freshly logged-on session must not report the previous incarnation's disconnect reason");
+    }
+
+    // FP Enhancement: 2026-08-16 — a second disconnect must report its own reason, not the
+    // first one. This does not depend on the Logon-clear fix above: the stamp in Disconnect
+    // is unconditional on every call, so this test stays green whether or not LastDisconnectReason
+    // is cleared on logon in between — it only pins that the SECOND disconnect's reason wins.
+    [Test]
+    public void SecondDisconnect_ReportsItsOwnReasonNotTheFirst()
+    {
+        Assert.That(_session.IsLoggedOn, Is.True, "session should be logged on after the setup logon");
+
+        _session.Disconnect("A");
+        _session.SetResponder(_responder);
+
+        var logon = new QuickFix.FIX42.Logon();
+        logon.Header.SetField(new TargetCompID(_sessionId.SenderCompID));
+        logon.Header.SetField(new SenderCompID(_sessionId.TargetCompID));
+        logon.Header.SetField(new MsgSeqNum(2));
+        logon.Header.SetField(new SendingTime(DateTime.UtcNow));
+        logon.SetField(new HeartBtInt(1));
+        _session.Next(logon.ConstructString());
+        Assert.That(_session.IsLoggedOn, Is.True, "session should be logged on again after the second logon");
+
+        _session.Disconnect("B");
+
+        Assert.That(_app.LogoutCalls, Is.EqualTo(2), "OnLogout should fire once per logged-on disconnect");
+        Assert.That(_app.SeenDisconnectReason, Is.EqualTo("B"),
+            "the second disconnect's reason must overwrite the first, not persist it");
     }
 }
