@@ -33,11 +33,17 @@ name: Review policy guard
 # first removing the corresponding assertion here.
 
 # Deliberately narrow: pull_request already covers branch commits.
+#
+# THIS REPO'S MAINLINE IS `fpsim`, NOT `main` - it is the FixPortal fork of QuickFIX/n.
+# The shipped asset filters on `main`, so until 2026-08-19 this guard never ran here at
+# all: no "Review policy intact" check existed on any PR, and the required-status rule had
+# nothing to wait for. Keep this branch list pointing at the real mainline, and re-apply it
+# when the asset is next copied in from scaffold-ci, which does not know about forks.
 on:
   push:
-    branches: [main]
+    branches: [fpsim]
   pull_request:
-    branches: [main]
+    branches: [fpsim]
 
 permissions:
   contents: read
