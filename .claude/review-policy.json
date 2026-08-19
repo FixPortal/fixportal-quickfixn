@@ -46,7 +46,7 @@
     "nuget.config",
     "spec/**",
     "DataDictionaries/**",
-    "DDTool/**",
+    "DDTool/**"
   ],
 
   "low": [
