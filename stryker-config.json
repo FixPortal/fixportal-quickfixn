@@ -9,7 +9,7 @@
     "report-file-name": "mutation-report",
     "mutation-level": "Standard",
     "coverage-analysis": "off",
-    "test-runner": "mtp",
+    "test-runner": "vstest",
     "concurrency": 4,
     "thresholds": {
       "high": 80,
