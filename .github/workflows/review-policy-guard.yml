@@ -136,7 +136,9 @@ jobs:
       # Deliberately NO actions/setup-python step. That installs a clean interpreter from
       # the tool cache, and PyYAML is not in it -- which failed this job on its first run
       # (2026-08-22, "PyYAML is not available to this runner"). The runner image's SYSTEM
-      # python3 does carry PyYAML, which is what the sibling assert_gate_coverage.py has
-      # been relying on. Adding setup-python here shadows the interpreter that works.
+      # python3 does carry PyYAML, which is what assert_workflow_hygiene.py below relies
+      # on. Adding setup-python here shadows the interpreter that works. (Its sibling
+      # assert_gate_coverage.py no longer needs PyYAML at all -- it parses with the
+      # stdlib -- so this step is the only PyYAML consumer left in this repo.)
       - name: Workflows must be hygienic (no target-context trigger, no write-all, actions pinned)
         run: python3 .github/scripts/assert_workflow_hygiene.py
