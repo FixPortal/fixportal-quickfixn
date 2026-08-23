@@ -65,7 +65,10 @@ jobs:
     - name: Restore dependencies
       run: dotnet restore
     - name: Acceptance
-      run: dotnet test --no-restore --verbosity normal AcceptanceTest --blame-hang-timeout 30s --blame-hang-dump-type none
+      # No --blame-hang-timeout here (unlike the unit-test step): several acceptance
+      # definitions legitimately idle for a full HeartBtInt (30s+) waiting to observe a
+      # TestRequest/Heartbeat, so a 30s inactivity abort kills healthy tests.
+      run: dotnet test --no-restore --verbosity normal AcceptanceTest
 
   publish:
     name: Publish Package (GitHub NuGet)
