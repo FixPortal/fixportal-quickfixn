@@ -108,8 +108,14 @@ jobs:
           # the context green while asserting nothing. The header comment's self-protection
           # argument only ever covered DELETION -- a deleted workflow never reports, so the
           # context stays pending and blocks -- and said nothing about neutering.
+          # fixportal-ci.yml and assert_gate_coverage.py are on the list for the same reason
+          # (adversarial finding R1, 2026-08-23): the required "CI Gate" context is produced by
+          # the PR's OWN copy of fixportal-ci.yml, so a PR that neuters ci-gate's if:, drops
+          # gate-coverage from needs:, or no-ops the checker still reports green. The guard
+          # protects its sibling or the sibling protects nothing.
           for required in .claude/review-policy.json .coderabbit.yaml \
-            .github/workflows/review-policy-guard.yml .github/scripts/assert_workflow_hygiene.py; do
+            .github/workflows/review-policy-guard.yml .github/scripts/assert_workflow_hygiene.py \
+            .github/workflows/fixportal-ci.yml .github/scripts/assert_gate_coverage.py; do
             if ! jq -e --arg r "$required" '.high | index($r)' "$policy" >/dev/null; then
               echo "::error file=$policy::'$required' is missing from the high list. An edit to it would get the lighter review."
               exit 1

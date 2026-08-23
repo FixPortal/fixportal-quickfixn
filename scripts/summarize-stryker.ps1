@@ -84,7 +84,7 @@ foreach ($status in ($allStatuses | Sort-Object)) {
     ).Sum
 }
 
-$approvedFinalStatuses = @('Killed', 'Timeout', 'Survived', 'NoCoverage', 'CompileError', 'Ignored')
+$approvedFinalStatuses = @('Killed', 'Timeout', 'Survived', 'NoCoverage', 'CompileError', 'RuntimeError', 'Ignored')
 $unapprovedStatuses = @(
     $statusTotals.GetEnumerator() |
         Where-Object { $_.Key -notin $approvedFinalStatuses -and $_.Value -gt 0 }

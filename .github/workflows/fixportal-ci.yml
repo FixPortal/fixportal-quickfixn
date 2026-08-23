@@ -7,7 +7,6 @@ name: FixPortal CI
 on:
   push:
     branches: [ "fpsim" ]
-    tags: [ "v*" ]
   pull_request:
     branches: [ "fpsim" ]
   workflow_dispatch:
@@ -44,10 +43,40 @@ jobs:
     - name: Unit Test
       run: dotnet test --no-build --verbosity normal UnitTests --blame-hang-timeout 30s --blame-hang-dump-type none
 
+  acceptance:
+    name: Acceptance tests
+    # Adversarial finding R10 (2026-08-23): the acceptance suite had left every merge-blocking
+    # lane — invisible to assert_gate_coverage.py precisely because it left the workflow the
+    # checker audits. On a FIX engine this is the wire-level integration coverage; it belongs
+    # in the gate. Reinstated as its own job so its 45-minute budget does not inflate the
+    # build job's timeout.
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    steps:
+    - uses: actions/checkout@v7
+      with:
+        persist-credentials: false
+    - name: Setup .NET
+      uses: actions/setup-dotnet@v6
+      with:
+        dotnet-version: 10.0.x
+    - name: Restore dependencies
+      run: dotnet restore
+    - name: Acceptance
+      run: dotnet test --no-restore --verbosity normal AcceptanceTest --blame-hang-timeout 30s --blame-hang-dump-type none
+
   publish:
     name: Publish Package (GitHub NuGet)
-    # Only publish on push to fpsim — not on PRs targeting fpsim.
-    if: github.event_name == 'push'
+    # Only publish on push to fpsim — not on PRs targeting fpsim, and not on tag pushes.
+    # Adversarial finding R2 (2026-08-23): `github.event_name == 'push'` is true for a tag
+    # push, so while `on.push.tags` existed, tagging ANY buildable commit — including an
+    # unmerged feature branch — ran this job with packages: write, bypassing the reviewed
+    # fpsim merge path. Tag creation is unrestricted (no tag-target rulesets exist), so the
+    # tags trigger was dropped and the ref is pinned here. Reinstate tag-triggered releases
+    # only behind a tag-namespace ruleset plus an explicit containment check in fpsim.
+    if: github.event_name == 'push' && github.ref == 'refs/heads/fpsim'
     needs: build
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -100,7 +129,7 @@ jobs:
   ci-gate:
     name: CI Gate
     if: always()
-    needs: [build, gate-coverage]
+    needs: [build, gate-coverage, acceptance]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions: {}
