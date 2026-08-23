@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
-"""Assert workflow hygiene structurally: no target-context trigger, no blanket
-write token, third-party actions pinned to an immutable ref.
+"""Assert workflow hygiene structurally: no privileged target-context trigger
+(pull_request_target or workflow_run), no blanket write token, third-party
+actions pinned to an immutable ref — including refs hidden inside local
+composite actions.
 
 This replaces three line-anchored `grep` assertions. They were bypassable by
 ORDINARY block-style YAML, not by any evasion technique: a value may sit on the
@@ -128,6 +130,11 @@ def is_pinned(ref):
     unpinned third-party action; and a digest-pinned `docker://` ref could never
     pass it at all. Parsed values carry no quotes, and the digest form is now
     recognised explicitly.
+
+    `./`-prefixed (local) refs are no longer waved through here: main() opens the
+    referenced action file and checks its inner `uses:` instead (see
+    local_composite_inner_refs). This branch remains only as the answer for any
+    future caller that has already done that expansion.
     """
     if ref.startswith("./"):
         return True  # A local action is this repository's own reviewed code.
@@ -140,6 +147,40 @@ def is_pinned(ref):
             char in "0123456789abcdef" for char in digest
         )
     return len(revision) == SHA_LEN and all(char in "0123456789abcdef" for char in revision)
+
+
+def local_composite_inner_refs(ref):
+    """The `uses:` refs inside a LOCAL composite action's steps.
+
+    Adversarial review 2026-08-23 (Low): is_pinned() previously returned True for
+    every ./-prefixed ref without opening the file, so a local wrapper invoking
+    `third/party@v1` executed while the guard reported everything pinned. The
+    referenced action.yml/action.yaml is now parsed and its composite steps are
+    checked like any workflow step. Missing or unparseable action files fail
+    closed -- a workflow referencing one is broken or hostile either way. Only
+    one level is expanded; a composite action nesting another local action is
+    out of scope (no such action exists in this repo).
+    """
+    base = Path(ref)
+    action_file = None
+    for candidate in (base / "action.yml", base / "action.yaml"):
+        if candidate.is_file():
+            action_file = candidate
+            break
+    if action_file is None:
+        raise FileNotFoundError(f"no action.yml/action.yaml under {ref}")
+
+    document = load(action_file)
+    runs = document.get("runs") if isinstance(document, dict) else None
+    if not isinstance(runs, dict) or runs.get("using") != "composite":
+        return []  # JavaScript and docker actions carry no further `uses:`.
+    refs = []
+    steps = runs.get("steps")
+    if isinstance(steps, list):
+        for step in steps:
+            if isinstance(step, dict) and isinstance(step.get("uses"), str):
+                refs.append(step["uses"])
+    return refs
 
 
 def main():
@@ -163,16 +204,20 @@ def main():
             continue
 
         for event in triggers(document):
-            # This trigger runs with a write token and repository secrets in the
-            # base repo's context, while able to check out attacker-controlled head
-            # code. It has legitimate uses; none should land without being argued
-            # for, so it is refused here rather than reviewed by glob.
-            if event == "pull_request_target":
+            # These triggers run with a write token and repository secrets in the
+            # base repo's context: pull_request_target while able to check out
+            # attacker-controlled head code, workflow_run while able to consume
+            # artifacts from an untrusted upstream run (the second standard
+            # pwn-request vector; added after adversarial review 2026-08-23 found
+            # the guard refused the first but not the second). Both have
+            # legitimate uses; none should land without being argued for, so they
+            # are refused here rather than reviewed by glob.
+            if event in ("pull_request_target", "workflow_run"):
                 print(
-                    f"::error file={path}::This workflow uses the target-context trigger, which grants "
-                    "a write token and repository secrets to a workflow that can check out untrusted "
-                    "head code. Use the plain pull_request trigger, or remove this assertion "
-                    "deliberately with a written rationale."
+                    f"::error file={path}::This workflow uses the '{event}' trigger, which grants "
+                    "a write token and repository secrets in the base repo's context to a run "
+                    "reachable from untrusted code or artifacts. Use the plain pull_request "
+                    "trigger, or remove this assertion deliberately with a written rationale."
                 )
                 failed = True
 
@@ -185,6 +230,28 @@ def main():
                 failed = True
 
         for job, ref in action_refs(document):
+            if ref.startswith("./"):
+                # A local action is this repository's own reviewed code, but its
+                # composite steps may invoke third-party actions; expand one level.
+                try:
+                    inner_refs = local_composite_inner_refs(ref)
+                except (FileNotFoundError, yaml.YAMLError) as error:
+                    print(
+                        f"::error file={path}::Local action '{ref}' (job '{job}') could not be "
+                        f"inspected: {error}. The guard fails closed on an uninspectable action."
+                    )
+                    failed = True
+                    continue
+                for inner_ref in inner_refs:
+                    if inner_ref.startswith("actions/") or is_pinned(inner_ref):
+                        continue
+                    print(
+                        f"::error file={path}::Local composite action '{ref}' (job '{job}') invokes "
+                        f"third-party action '{inner_ref}' without an immutable pin. A mutable tag "
+                        "can change after review, and the wrapper hid it from the top-level check."
+                    )
+                    failed = True
+                continue
             if is_pinned(ref):
                 continue
             # actions/* is GitHub's own namespace, and a mutable tag there means
