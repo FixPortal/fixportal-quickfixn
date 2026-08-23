@@ -96,7 +96,15 @@ public class HttpServer : IDisposable {
         if (_httpListener.IsListening) {
             _running = false;
             _httpListener.Stop();
-            _connectionThread.Join();
+            // FP Enhancement: 2026-08-23 — bound the join (adversarial finding R7).
+            // HttpListener.Stop() aborts only a PENDING GetContext(); a handler blocked in the
+            // synchronous response write (a client that stalls reading) is not interrupted, so
+            // an unbounded Join() could hang graceful shutdown for the OS send timeout. Every
+            // other join in this engine is bounded (Join(2000)/Join(5000)); match that here.
+            if (Environment.CurrentManagedThreadId != _connectionThread.ManagedThreadId
+                && !_connectionThread.Join(5000))
+                System.Diagnostics.Trace.TraceWarning(
+                    "HttpServer.Stop(): connection thread did not exit within 5s; a stalled client write is still outstanding.");
         }
     }
 

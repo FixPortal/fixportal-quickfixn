@@ -343,11 +343,15 @@ public class SocketInitiator : AbstractInitiator
         SocketInitiatorThread? thread;
         lock (_sync)
         {
-            if (!_removedThreads.Remove(sessionId, out thread))
+            // FP Enhancement: 2026-08-23 — keep the deferred reader REGISTERED in
+            // _removedThreads until it actually exits (finding R4): previously it was dropped
+            // here, so OnStop() had nothing to wait on and Stop()/Dispose() could return with
+            // the reader still owning the Session. OnStop() now bound-joins these readers.
+            if (!_removedThreads.TryGetValue(sessionId, out thread))
                 return false;
         }
 
-        return thread.TryRunWhenExited(() =>
+        bool deferred = thread.TryRunWhenExited(() =>
         {
             try
             {
@@ -364,7 +368,21 @@ public class SocketInitiator : AbstractInitiator
                 }
                 catch { }
             }
+            finally
+            {
+                lock (_sync)
+                    _removedThreads.Remove(sessionId);
+            }
         });
+
+        if (!deferred)
+        {
+            // Reader already exited; the caller runs the completion synchronously.
+            lock (_sync)
+                _removedThreads.Remove(sessionId);
+        }
+
+        return deferred;
     }
 
     protected override bool OnPoll(double timeout)
@@ -372,9 +390,18 @@ public class SocketInitiator : AbstractInitiator
         throw new NotImplementedException("FIXME - SocketInitiator.OnPoll not implemented!");
     }
 
+    protected override void OnStopping()
+    {
+        // FP Enhancement: 2026-08-23 — refuse new connection admissions for the whole shutdown
+        // window (adversarial finding R6), not just from OnStop() onwards.
+        lock (_connectRequestSync)
+            _shutdownRequested = true;
+    }
+
     protected override void OnStop()
     {
         List<SocketInitiatorThread> threads;
+        List<SocketInitiatorThread> deferredThreads;
         CancellationTokenSource connectionSetupCancellation;
         lock (_connectRequestSync)
         {
@@ -384,6 +411,12 @@ public class SocketInitiator : AbstractInitiator
             {
                 threads = [.. _threads.Values];
                 _threads.Clear();
+                // FP Enhancement: 2026-08-23 — deferred-removal readers were migrated out of
+                // _threads at OnRemove, so the join sweep below never saw them (finding R4):
+                // Stop() could return while a wedged reader still owned its Session. They stay
+                // in _removedThreads until exit (see TryDeferRemovalUntilQuiesced) and are
+                // bound-joined here.
+                deferredThreads = [.. _removedThreads.Values];
             }
             Monitor.PulseAll(_connectRequestSync);
         }
@@ -403,6 +436,18 @@ public class SocketInitiator : AbstractInitiator
             catch (Exception ex)
             {
                 _nonSessionLog.Log(LogLevel.Warning, ex, "Socket reader thread cleanup failed.");
+            }
+        }
+
+        foreach (SocketInitiatorThread thread in deferredThreads)
+        {
+            try
+            {
+                thread.Join();
+            }
+            catch (Exception ex)
+            {
+                _nonSessionLog.Log(LogLevel.Warning, ex, "Deferred socket reader thread cleanup failed.");
             }
         }
     }

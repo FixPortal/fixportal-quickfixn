@@ -20,6 +20,7 @@ public abstract class AbstractInitiator : IInitiator
     private readonly HashSet<SessionID> _connected = [];
     private readonly HashSet<SessionID> _disconnected = [];
     private readonly HashSet<SessionID> _removing = [];
+    private readonly HashSet<SessionID> _creating = [];
     private readonly SessionFactory _sessionFactory;
     private Thread? _thread;
 
@@ -177,10 +178,32 @@ public abstract class AbstractInitiator : IInitiator
 
         lock (_sync)
         {
-            if (_sessionIDs.Contains(sessionId) || _removing.Contains(sessionId))
+            if (_sessionIDs.Contains(sessionId) || _removing.Contains(sessionId) || !_creating.Add(sessionId))
                 return false;
+        }
 
-            Session session = _sessionFactory.Create(sessionId, dict);
+        Session session;
+        try
+        {
+            // FP Enhancement: 2026-08-23 — run factory creation OUTSIDE _sync (adversarial
+            // finding R8). SessionFactory.Create parses data-dictionary XML, opens the message
+            // store and log, and invokes the public Application.OnCreate callback — blocking
+            // I/O and third-party code whose duration the engine does not control. Holding the
+            // core state lock across it stalled every connection-state transition and could
+            // deadlock on an OnCreate that coordinates with a thread needing _sync. The ID is
+            // reserved in _creating instead, and the reservation is rolled back on failure.
+            session = _sessionFactory.Create(sessionId, dict);
+        }
+        catch
+        {
+            lock (_sync)
+                _creating.Remove(sessionId);
+            throw;
+        }
+
+        lock (_sync)
+        {
+            _creating.Remove(sessionId);
             _sessionIDs.Add(sessionId);
             _sessions[sessionId] = session;
             SetDisconnected(sessionId);
@@ -195,7 +218,9 @@ public abstract class AbstractInitiator : IInitiator
     /// <param name="terminateActiveSession">if true, force disconnection and removal of session even if it has an active connection</param>
     /// <returns>true if session removed or not already present; false if could not be removed due to an active connection</returns>
     /// <remarks>A duplicate call returns true while cleanup is still in progress; the same ID cannot be added again until cleanup completes.</remarks>
-    /// <exception cref="Exception">Session disposal failures, including message-store disposal failures, are propagated.</exception>
+    /// <exception cref="Exception">Session disposal failures, including message-store disposal failures, are propagated
+    /// when removal completes synchronously. When the transport defers completion until its reader thread exits,
+    /// disposal happens after this method has returned; such failures are logged, not propagated.</exception>
     public bool RemoveSession(SessionID sessionId, bool terminateActiveSession)
     {
         Session? session = null;
@@ -227,9 +252,24 @@ public abstract class AbstractInitiator : IInitiator
                     sessionSettings = _settings.Get(sessionId);
             }
         }
-        if (disconnectRequired)
-            session?.Disconnect("Dynamic session removal");
-        OnRemove(sessionId); // ensure session's reader thread is gone before we dispose session
+        try
+        {
+            if (disconnectRequired)
+                session?.Disconnect("Dynamic session removal");
+            OnRemove(sessionId); // ensure session's reader thread is gone before we dispose session
+        }
+        finally
+        {
+            // FP Enhancement: 2026-08-23 — a throw out of Disconnect (e.g. from a user
+            // Application.OnLogout, invoked inside Session.Disconnect with no containment)
+            // must not strand the _removing reservation: without this finally the ID stays
+            // reserved for the initiator's lifetime, blocking CreateSession/AddSession, and
+            // the Session is never disposed. Run completion — or hand it to the transport's
+            // deferred path — before any exception propagates.
+            // A transport whose bounded shutdown returned before its old worker exited owns completion.
+            if (!TryDeferRemovalUntilQuiesced(sessionId, CompleteRemoval))
+                CompleteRemoval();
+        }
 
         void CompleteRemoval()
         {
@@ -254,10 +294,6 @@ public abstract class AbstractInitiator : IInitiator
                 }
             }
         }
-
-        // A transport whose bounded shutdown returned before its old worker exited owns completion.
-        if (!TryDeferRemovalUntilQuiesced(sessionId, CompleteRemoval))
-            CompleteRemoval();
 
         return true;
     }
@@ -285,6 +321,13 @@ public abstract class AbstractInitiator : IInitiator
 
             if (IsStopped)
                 return;
+
+            // FP Enhancement: 2026-08-23 — refuse new admissions for the WHOLE shutdown window
+            // (adversarial finding R6). The transport's shutdown flag was previously set inside
+            // OnStop(), which runs after the logout sweep, the grace wait and the disconnect
+            // sweep below — a pending connection completing in that window could still activate
+            // and send a Logon from an engine that is shutting down.
+            OnStopping();
 
             lock (_sync)
             {
@@ -333,6 +376,14 @@ public abstract class AbstractInitiator : IInitiator
                 _pending.Clear();
                 _connected.Clear();
                 _disconnected.Clear();
+                // FP Enhancement: 2026-08-23 — safety net for deferred session removals
+                // (adversarial finding R4). A removal whose reader outlived the bounded join
+                // keeps its ID in _removing, which blocks CreateSession on the next Start().
+                // Transports bound-wait deferred readers in OnStop(); anything still
+                // outstanding here is released so restart is not blocked. The deferred
+                // completion remains safe: its _removing.Remove is a no-op and its settings
+                // detach is ReferenceEquals-guarded against a same-ID replacement.
+                _removing.Clear();
             }
         }
     }
@@ -399,6 +450,15 @@ public abstract class AbstractInitiator : IInitiator
     /// Implemented to stop a running initiator.
     /// </summary>
     protected abstract void OnStop();
+
+    /// <summary>
+    /// Pre-stop hook, invoked at the very start of <see cref="Stop(bool)"/> — before the logout
+    /// sweep, the grace wait and the disconnect sweep. Transports override this to refuse new
+    /// admissions (e.g. pending connection activations) for the entire shutdown window rather
+    /// than only from <see cref="OnStop"/> onwards.
+    /// </summary>
+    protected virtual void OnStopping()
+    { }
 
     /// <summary>
     /// Implemented to connect a session to its target.
