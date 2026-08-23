@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Threading;
 using Microsoft.Extensions.Logging;
 using QuickFix.Fields;
@@ -37,7 +38,7 @@ public class Session : IDisposable
     // FP Enhancement: 2026-08-10 — retain successful outbound retransmissions so session Reject callbacks can distinguish replayed frames from first transmissions.
     private readonly object _resentOutboundHistorySync = new();
     private readonly HashSet<SeqNumType> _resentOutboundHistory = [];
-    private readonly Queue<SeqNumType> _resentOutboundHistoryOrder = [];
+    private Queue<SeqNumType> _resentOutboundHistoryOrder = [];
 
     private const LogLevel MessagesLogLevel = LogLevel.Information;
 
@@ -389,7 +390,14 @@ public class Session : IDisposable
     {
         if (removeDupeFlag) message.Header.RemoveField(Fields.Tags.PossDupFlag);
         if (removeOriginalSendingTime) message.Header.RemoveField(Fields.Tags.OrigSendingTime);
-        return SendRaw(message, 0);
+        bool sent = SendRaw(message, 0);
+        // FP Enhancement: 2026-08-23 — adversarial finding R9: retransmitting with
+        // removeDupeFlag: false retains the original dup-flag semantics, i.e. it IS a resend;
+        // record it in the same history as engine gap-fill replay so a later Reject referencing
+        // this seqnum is classified as referencing a resent message.
+        if (sent && !removeDupeFlag && message.Header.IsSetField(Fields.Tags.MsgSeqNum))
+            RecordResentOutbound(message.Header.GetULong(Fields.Tags.MsgSeqNum));
+        return sent;
     }
 
     /// <summary>
@@ -525,7 +533,10 @@ public class Session : IDisposable
         }
 
         if (IsNewSession)
-            _state.Reset("New session (detected in Next())");
+            // FP Enhancement: 2026-08-23 — adversarial finding R5: Reset recycles sequence
+            // numbers to 1, so the resend histories (keyed by seqnum) must be dropped with it;
+            // otherwise day-1 entries misclassify day-2 Rejects as resend references.
+            ResetStateAndResendHistories("New session (detected in Next())");
 
         if (!IsEnabled)
         {
@@ -725,7 +736,8 @@ public class Session : IDisposable
         }
 
         if (IsNewSession)
-            _state.Reset("New session (detected in Next(Message))");
+            // FP Enhancement: 2026-08-23 — adversarial finding R5; see Next().
+            ResetStateAndResendHistories("New session (detected in Next(Message))");
 
         Message? message = null; // declared outside of try-block so that catch-blocks can use it
 
@@ -1380,7 +1392,9 @@ public class Session : IDisposable
     {
         if(IsLoggedOn)
             GenerateLogout(logoutMessage);
-        Disconnect("Resetting...");
+        // FP Enhancement: 2026-08-23 — keep the informative reason in LastDisconnectReason
+        // instead of collapsing every reset-driven teardown to a generic "Resetting...".
+        Disconnect($"Resetting: {loggedReason}");
         _state.Reset(loggedReason);
     }
 
@@ -1849,8 +1863,14 @@ public class Session : IDisposable
         {
             lock (_resentOutboundHistorySync)
             {
+                // FP Enhancement: 2026-08-23 — a REPEAT retransmission refreshes the entry's
+                // FIFO position (eviction ranks by most recent retransmission, matching the
+                // documented "most recent 1,024 distinct" contract); previously the
+                // HashSet.Add short-circuit left it ranked by its FIRST retransmission.
+                // Repeats are rare, so the O(n) queue rebuild is fine.
                 if (!_resentOutboundHistory.Add(msgSeqNum))
-                    return;
+                    _resentOutboundHistoryOrder = new Queue<SeqNumType>(
+                        _resentOutboundHistoryOrder.Where(s => s != msgSeqNum));
 
                 _resentOutboundHistoryOrder.Enqueue(msgSeqNum);
                 if (_resentOutboundHistoryOrder.Count > ResentOutboundHistoryCapacity)
@@ -1878,6 +1898,19 @@ public class Session : IDisposable
                 _resentOutboundHistoryOrder.Clear();
             }
         }
+    }
+
+    // FP Enhancement: 2026-08-23 — sequence-number recycling and resend-history clearing must
+    // happen together BY CONSTRUCTION (adversarial finding R5). _state.Reset() recycles
+    // sequence numbers to 1; the resend histories are keyed by seqnum, so any reset path that
+    // does not clear them lets stale entries misclassify a later Reject as referencing a resent
+    // message. Use this helper on every reset path that does not already clear both histories
+    // (Disconnect and the counterparty-reset paths do).
+    private void ResetStateAndResendHistories(string loggedReason)
+    {
+        ClearResentOutboundHistory();
+        _resentTracker.Clear();
+        _state.Reset(loggedReason);
     }
 
     // FP Enhancement: 2026-05-24 — emit XML + JSON renderings of tracked messages via Log.OnIncomingAndOutgoing. Tracked messages are those whose rendered string is present in SessionID.SessionLogIdentifiers (populated by application code).
