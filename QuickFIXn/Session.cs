@@ -469,6 +469,11 @@ public class Session : IDisposable
     // applications that classify why a session went down. LastDisconnectReason is why
     // the socket was torn down; LogoutReason is non-empty only when Logout(reason) was
     // called, i.e. the session was deliberately taken out of service.
+    //
+    // Lifetime (adversarial review 2026-08-23, Low): both values are reliable inside
+    // Application.OnLogout and after Disconnect returns. LogoutReason is cleared by the
+    // Disconnect that fires that callback, and LastDisconnectReason by the next
+    // SetResponder (i.e. the next connection); poll them before those points.
     public string LastDisconnectReason => _state.LastDisconnectReason;
 
     public string LogoutReason => _state.LogoutReason;
@@ -481,6 +486,12 @@ public class Session : IDisposable
     {
         lock (_sync)
         {
+            // FP Enhancement: 2026-08-23 — stamp the reason unconditionally (adversarial
+            // review, Low): previously it sat inside the ReceivedLogon/SentLogon guard, so a
+            // pre-logon teardown (e.g. a failed acceptor logon) left LastDisconnectReason
+            // empty. Only the OnLogout callback stays conditional.
+            _state.LastDisconnectReason = reason;
+
             if (_responder is not null)
             {
                 Log.Log(LogLevel.Information, "Session {SessionID} disconnecting: {Reason}", SessionID, reason);
@@ -501,7 +512,6 @@ public class Session : IDisposable
                 // application so it can distinguish an intentional logout from a drop.
                 // Stamped before the callback; LogoutReason is not cleared until below,
                 // so both signals are readable from inside OnLogout.
-                _state.LastDisconnectReason = reason;
                 Application.OnLogout(SessionID);
             }
 

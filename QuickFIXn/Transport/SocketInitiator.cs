@@ -91,11 +91,17 @@ public class SocketInitiator : AbstractInitiator
         }
         finally
         {
-            try { t.Initiator.RemoveThread(t); }
-            catch (Exception ex) { failure ??= ex; }
+            // FP Enhancement: 2026-08-23 — signal exit BEFORE unregistering (adversarial review,
+            // Low X1). Previously the reader removed itself from _threads first, so a concurrent
+            // OnRemove found nothing to join or defer onto and RemoveSession disposed the Session
+            // synchronously while this reader was still executing. With this order the reader
+            // stays registered until after SignalExited, so OnRemove always sees it — either
+            // joining it (bounded) or deferring removal onto a thread that has already exited.
             try { t.Initiator.SetDisconnected(t.Session); }
             catch (Exception ex) { failure ??= ex; }
             try { t.SignalExited(); }
+            catch (Exception ex) { failure ??= ex; }
+            try { t.Initiator.RemoveThread(t); }
             catch (Exception ex) { failure ??= ex; }
         }
 
