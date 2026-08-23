@@ -80,7 +80,7 @@ jobs:
     # tags trigger was dropped and the ref is pinned here. Reinstate tag-triggered releases
     # only behind a tag-namespace ruleset plus an explicit containment check in fpsim.
     if: github.event_name == 'push' && github.ref == 'refs/heads/fpsim'
-    needs: build
+    needs: [build, acceptance]
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
