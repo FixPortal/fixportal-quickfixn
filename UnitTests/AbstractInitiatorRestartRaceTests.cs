@@ -26,6 +26,7 @@ public class AbstractInitiatorRestartRaceTests
         public readonly ManualResetEventSlim Entered = new(false);
         public readonly ManualResetEventSlim Release = new(false);
         public readonly ManualResetEventSlim StopEntered = new(false);
+        public readonly ManualResetEventSlim SecondWorkerSpawned = new(false);
         public int OnStartCount;
 
         public GatedInitiator(IApplication app, IMessageStoreFactory store, SessionSettings settings)
@@ -33,7 +34,8 @@ public class AbstractInitiatorRestartRaceTests
 
         protected override void OnStart()
         {
-            Interlocked.Increment(ref OnStartCount);
+            if (Interlocked.Increment(ref OnStartCount) > 1)
+                SecondWorkerSpawned.Set();
             Entered.Set();
             Release.Wait(); // block regardless of IsStopped so the test can pin the race window
         }
@@ -107,12 +109,12 @@ public class AbstractInitiatorRestartRaceTests
         // above structurally cannot reach.
         init.Start();
 
-        // Give a wrongly spawned second worker time to run OnStart before asserting — the
-        // increment is on the worker thread, so an immediate assert would race the mutation
-        // this test exists to pin.
-        Thread.Sleep(500);
-        Assert.That(init.OnStartCount, Is.EqualTo(1),
+        // Deterministic mutation detection: if the guard is regressed, the second worker's
+        // OnStart sets SecondWorkerSpawned as soon as it runs. Waiting on the event (rather
+        // than a fixed sleep) fails fast on regression and never under-waits on a slow runner.
+        Assert.That(init.SecondWorkerSpawned.Wait(2000), Is.False,
             "a second Start() with an existing worker must be refused by the _thread guard");
+        Assert.That(init.OnStartCount, Is.EqualTo(1));
 
         init.Release.Set();
         init.Dispose();
