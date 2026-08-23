@@ -6,11 +6,18 @@ using QuickFix.Store;
 
 namespace UnitTests;
 
-// Pins the AbstractInitiator restart-race fix: a Start() racing an in-flight Stop() must not
-// resurrect/duplicate the worker thread. The bug was that Stop() sets IsStopped=true and blocks in
-// Join() *outside* _sync before nulling _thread, so a concurrent Start() (guarded only by
-// "_thread is not null && !IsStopped") would pass, flip IsStopped back to false, and spawn a second
-// OnStart worker. The fix guards Start() on "_thread is not null" alone.
+// Pins the two guards that keep AbstractInitiator.Start() from spawning a duplicate worker:
+//
+// 1. The lifecycle lock: Stop(bool) holds _lifecycleSync across its whole teardown (including
+//    Join(5000)), so a Start() racing an in-flight Stop() bails at Monitor.TryEnter and returns
+//    immediately. Start_RacingAnInFlightStop_DoesNotSpawnASecondWorker pins THAT guard — it
+//    cannot reach the "_thread is not null" check, because Stop never releases the lock inside
+//    the race window. (An earlier header claimed this test pinned the _thread guard; that was
+//    adversarial finding R11 — the claim was wrong, the lock makes that path unreachable here.)
+//
+// 2. The "_thread is not null" guard: a plain second Start() with no Stop in flight passes
+//    Monitor.TryEnter and is refused by the _thread check.
+//    Start_CalledTwiceWithNoStop_DoesNotSpawnASecondWorker pins THAT guard.
 [TestFixture]
 public class AbstractInitiatorRestartRaceTests
 {
@@ -82,6 +89,32 @@ public class AbstractInitiatorRestartRaceTests
         Assert.That(init.OnStartCount, Is.EqualTo(1),
             "a Start racing an in-flight Stop must not resurrect/duplicate the worker thread");
 
+        init.Dispose();
+    }
+
+    [Test]
+    public void Start_CalledTwiceWithNoStop_DoesNotSpawnASecondWorker()
+    {
+        var init = new GatedInitiator(new SessionTestSupport.MockApplication(),
+            new MemoryStoreFactory(), InitiatorSettings());
+
+        init.Start();
+        Assert.That(init.Entered.Wait(5000), Is.True, "OnStart should run");
+        Assert.That(init.OnStartCount, Is.EqualTo(1));
+
+        // No Stop() in flight, so this Start() passes Monitor.TryEnter(_lifecycleSync) and is
+        // refused by the "_thread is not null" guard alone — the guard the racing-Stop test
+        // above structurally cannot reach.
+        init.Start();
+
+        // Give a wrongly spawned second worker time to run OnStart before asserting — the
+        // increment is on the worker thread, so an immediate assert would race the mutation
+        // this test exists to pin.
+        Thread.Sleep(500);
+        Assert.That(init.OnStartCount, Is.EqualTo(1),
+            "a second Start() with an existing worker must be refused by the _thread guard");
+
+        init.Release.Set();
         init.Dispose();
     }
 }
