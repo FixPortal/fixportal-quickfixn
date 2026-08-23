@@ -390,14 +390,21 @@ public class Session : IDisposable
     {
         if (removeDupeFlag) message.Header.RemoveField(Fields.Tags.PossDupFlag);
         if (removeOriginalSendingTime) message.Header.RemoveField(Fields.Tags.OrigSendingTime);
-        bool sent = SendRaw(message, 0);
         // FP Enhancement: 2026-08-23 — adversarial finding R9: retransmitting with
         // removeDupeFlag: false retains the original dup-flag semantics, i.e. it IS a resend;
         // record it in the same history as engine gap-fill replay so a later Reject referencing
         // this seqnum is classified as referencing a resent message.
-        if (sent && !removeDupeFlag && message.Header.IsSetField(Fields.Tags.MsgSeqNum))
-            RecordResentOutbound(message.Header.GetULong(Fields.Tags.MsgSeqNum));
-        return sent;
+        // The lock makes send+record atomic against Disconnect/clear (SendRaw and
+        // RecordResentOutbound both take _sync reentrantly): without it, a Disconnect could
+        // clear the history between the two and this call would re-add a stale seqnum into the
+        // recycled sequence space.
+        lock (_sync)
+        {
+            bool sent = SendRaw(message, 0);
+            if (sent && !removeDupeFlag && message.Header.IsSetField(Fields.Tags.MsgSeqNum))
+                RecordResentOutbound(message.Header.GetULong(Fields.Tags.MsgSeqNum));
+            return sent;
+        }
     }
 
     /// <summary>

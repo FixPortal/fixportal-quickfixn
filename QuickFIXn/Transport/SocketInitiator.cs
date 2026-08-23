@@ -370,8 +370,15 @@ public class SocketInitiator : AbstractInitiator
             }
             finally
             {
+                // Remove only if the registry still maps this ID to THIS reader — a same-ID
+                // session recreated and re-removed while this callback was outstanding must
+                // not lose its own registration.
                 lock (_sync)
-                    _removedThreads.Remove(sessionId);
+                {
+                    if (_removedThreads.TryGetValue(sessionId, out SocketInitiatorThread? current)
+                        && ReferenceEquals(current, thread))
+                        _removedThreads.Remove(sessionId);
+                }
             }
         });
 
@@ -379,7 +386,11 @@ public class SocketInitiator : AbstractInitiator
         {
             // Reader already exited; the caller runs the completion synchronously.
             lock (_sync)
-                _removedThreads.Remove(sessionId);
+            {
+                if (_removedThreads.TryGetValue(sessionId, out SocketInitiatorThread? current)
+                    && ReferenceEquals(current, thread))
+                    _removedThreads.Remove(sessionId);
+            }
         }
 
         return deferred;
