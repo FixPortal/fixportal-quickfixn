@@ -106,16 +106,27 @@ internal static class StreamFactory
         }
 
         using CancellationTokenRegistration registration = cancellationToken.Register(socket.Dispose);
-        if (!socket.Connected)
-            socket.Connect(endpoint);
+        // FP Enhancement: 2026-08-23 — the socket gains an owner only at NetworkStream(socket,
+        // true) below; a throw from Connect or the timeout setters (the COMMON path against a
+        // down host) would leak one handle per retry until the finalizer (adversarial review, Low).
+        try
+        {
+            if (!socket.Connected)
+                socket.Connect(endpoint);
 
-        if (settings.SocketReceiveTimeout.HasValue)
-        {
-            socket.ReceiveTimeout = settings.SocketReceiveTimeout.Value;
+            if (settings.SocketReceiveTimeout.HasValue)
+            {
+                socket.ReceiveTimeout = settings.SocketReceiveTimeout.Value;
+            }
+            if (settings.SocketSendTimeout.HasValue)
+            {
+                socket.SendTimeout = settings.SocketSendTimeout.Value;
+            }
         }
-        if (settings.SocketSendTimeout.HasValue)
+        catch
         {
-            socket.SendTimeout = settings.SocketSendTimeout.Value;
+            socket.Dispose();
+            throw;
         }
 
         Stream stream = new NetworkStream(socket, true);

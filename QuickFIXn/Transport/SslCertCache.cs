@@ -69,17 +69,19 @@ internal static class SslCertCache {
         }
 
 #if NET9_0_OR_GREATER
+        // FP Enhancement: 2026-08-23 — fall back in ONE direction only (adversarial review, Low).
+        // With a password, LoadPkcs12FromFile throwing CryptographicException almost always means
+        // a wrong password: retrying without it replaced the informative error with a generic
+        // format failure, and could silently load a plain cert despite the spurious password.
+        if (password is not null)
+            return X509CertificateLoader.LoadPkcs12FromFile(name, password);
         try
         {
-            return password is null
-                ? X509CertificateLoader.LoadCertificateFromFile(name)
-                : X509CertificateLoader.LoadPkcs12FromFile(name, password);
+            return X509CertificateLoader.LoadCertificateFromFile(name);
         }
         catch (CryptographicException)
         {
-            return password is null
-                ? X509CertificateLoader.LoadPkcs12FromFile(name, password)
-                : X509CertificateLoader.LoadCertificateFromFile(name);
+            return X509CertificateLoader.LoadPkcs12FromFile(name, null);
         }
 #else
         return password is not null

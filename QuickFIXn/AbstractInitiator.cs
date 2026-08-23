@@ -131,7 +131,24 @@ public abstract class AbstractInitiator : IInitiator
                     _thread = worker;
                 }
             }
-            worker.Start();
+            // FP Enhancement: 2026-08-23 — roll the lifecycle state back if thread creation
+            // fails (adversarial review, Low X2): previously _thread/IsStopped stayed committed
+            // after a worker.Start() throw, leaving the initiator neither restartable (Start
+            // returns early on _thread != null) nor cleanly stoppable (Stop joins an unstarted
+            // thread, which throws ThreadStateException).
+            try
+            {
+                worker.Start();
+            }
+            catch
+            {
+                lock (_sync)
+                {
+                    _thread = null;
+                    IsStopped = true;
+                }
+                throw;
+            }
         }
         finally
         {
