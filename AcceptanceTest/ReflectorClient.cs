@@ -1,4 +1,4 @@
-﻿using NUnit.Framework;
+using NUnit.Framework;
 using System;
 using System.Collections.Generic;
 using System.Net;
@@ -23,18 +23,32 @@ internal class ReflectorClient : IReflector
         { "122", new Regex(@"\d{8}-\d{2}:\d{2}:\d{2}", RegexOptions.Compiled) },
     };
 
+    /// <summary>
+    /// Default ceiling on a single blocking read. The longest legitimate idle in the suite
+    /// is a disconnect at ~2.4x the largest HeartBtInt in use (30s), so ~72s. Past this the
+    /// engine has gone quiet rather than the definition idling, and without a ceiling that
+    /// wedges the whole run until the CI job's own timeout with no diagnostic.
+    /// </summary>
+    internal static readonly TimeSpan DefaultReceiveTimeout = TimeSpan.FromMinutes(2);
+
     private readonly IPEndPoint _endPoint;
     private readonly ReflectorParser _parser;
     private readonly byte[] _readBuffer;
+    private readonly TimeSpan _receiveTimeout;
 
     private Socket? _socket;
 
 
-    public ReflectorClient(IPEndPoint endPoint)
+    /// <param name="receiveTimeout">
+    /// Overrides <see cref="DefaultReceiveTimeout"/>. Only tests covering the timeout path
+    /// itself pass this; the suite uses the default.
+    /// </param>
+    public ReflectorClient(IPEndPoint endPoint, TimeSpan? receiveTimeout = null)
     {
         _endPoint = endPoint;
         _parser = new ReflectorParser();
         _readBuffer = new byte[1024];
+        _receiveTimeout = receiveTimeout ?? DefaultReceiveTimeout;
     }
 
     public void Expect(string expectedMessage)
@@ -44,7 +58,7 @@ internal class ReflectorClient : IReflector
         string actualMessage;
         while (!_parser.ReadFixMessage(out actualMessage))
         {
-            int bytesReceived = _socket.Receive(_readBuffer);
+            int bytesReceived = Receive($"message: {expectedMessage.Replace("\u0001", "|")}");
 
             if (bytesReceived == 0)
             {
@@ -183,7 +197,26 @@ internal class ReflectorClient : IReflector
         Assert.That(_socket, Is.Null);
 
         _socket = new Socket(SocketType.Stream, ProtocolType.Tcp);
+        _socket.ReceiveTimeout = (int)_receiveTimeout.TotalMilliseconds;
         _socket.Connect(_endPoint);
+    }
+
+    /// <summary>
+    /// Blocking read bounded by <see cref="DefaultReceiveTimeout"/>, so that an engine which has
+    /// gone quiet fails the one test with a readable message instead of wedging the run.
+    /// </summary>
+    /// <param name="waitingFor">What the caller was waiting for, quoted in the failure.</param>
+    private int Receive(string waitingFor)
+    {
+        try
+        {
+            return _socket!.Receive(_readBuffer);
+        }
+        catch (SocketException ex) when (ex.SocketErrorCode == SocketError.TimedOut)
+        {
+            Assert.Fail($"Timed out after {_receiveTimeout.TotalSeconds:0}s waiting for {waitingFor}");
+            throw;
+        }
     }
 
     public void InitiateDisconnect()
@@ -197,7 +230,7 @@ internal class ReflectorClient : IReflector
     {
         Assert.That(_socket, Is.Not.Null);
 
-        int bytesRead = _socket.Receive(_readBuffer);
+        int bytesRead = Receive("the remote host to disconnect");
         Assert.That(bytesRead, Is.EqualTo(0));
 
         ShutdownSocket();
