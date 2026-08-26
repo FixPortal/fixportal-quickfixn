@@ -22,6 +22,7 @@ if (args is ["--check"])
 BenchmarkSwitcher.FromAssembly(typeof(Program).Assembly).Run(args);
 
 [MemoryDiagnoser]
+[OperationsPerSecond]
 public class EnginePipelineBenchmarks
 {
     private const int FrameOperationsPerInvoke = 2097152;
@@ -76,6 +77,26 @@ public class EnginePipelineBenchmarks
             : typeof(QuickFix.FIX50SP2.TradeCaptureReport);
         if (_message.GetType() != expectedType)
             throw new InvalidOperationException($"Expected {expectedType.Name}, got {_message.GetType().Name}.");
+
+        if (Payload == PayloadKind.TradeCaptureReport)
+        {
+            if (_message.GroupCount(Fields.Tags.NoSides) != 2)
+                throw new InvalidOperationException("TradeCaptureReport did not retain both side groups.");
+
+            for (var sideIndex = 1; sideIndex <= 2; sideIndex++)
+            {
+                var side = _message.GetGroup(sideIndex, Fields.Tags.NoSides);
+                if (side.GroupCount(Fields.Tags.NoPartyIDs) != 3)
+                    throw new InvalidOperationException("TradeCaptureReport did not retain its nested party groups.");
+
+                for (var partyIndex = 1; partyIndex <= 3; partyIndex++)
+                {
+                    var party = side.GetGroup(partyIndex, Fields.Tags.NoPartyIDs);
+                    if (party.GroupCount(Fields.Tags.NoPartySubIDs) != 1)
+                        throw new InvalidOperationException("TradeCaptureReport did not retain its nested party sub-ID group.");
+                }
+            }
+        }
 
         try
         {
@@ -218,6 +239,25 @@ public class EnginePipelineBenchmarks
                 Account = new Fields.Account($"ACCOUNT-{i}"),
                 SideLastQty = new Fields.SideLastQty(125),
             };
+
+            for (var partyIndex = 0; partyIndex < 3; partyIndex++)
+            {
+                var party = new QuickFix.FIX50SP2.TradeCaptureReport.NoSidesGroup.NoPartyIDsGroup
+                {
+                    PartyID = new Fields.PartyID($"PARTY-{i}-{partyIndex}"),
+                    PartyIDSource = new Fields.PartyIDSource(Fields.PartyIDSource.PROPRIETARY_CUSTOM_CODE),
+                    PartyRole = new Fields.PartyRole(partyIndex + 1),
+                };
+                party.AddGroup(
+                    new QuickFix.FIX50SP2.TradeCaptureReport.NoSidesGroup.NoPartyIDsGroup.NoPartySubIDsGroup
+                    {
+                        PartySubID = new Fields.PartySubID($"TRADER-{i}-{partyIndex}"),
+                        PartySubIDType = new Fields.PartySubIDType(Fields.PartySubIDType.PERSON),
+                    }
+                );
+                side.AddGroup(party);
+            }
+
             report.AddGroup(side);
         }
 
