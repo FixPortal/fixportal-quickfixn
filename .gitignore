@@ -6,6 +6,7 @@ UnitTests/bin/*
 UnitTests/obj/*
 PerformanceTests/bin/*
 PerformanceTests/obj/*
+BenchmarkDotNet.Artifacts/
 *.user
 UnitTests/TestResult.xml
 QuickFIXn.sln.cache
