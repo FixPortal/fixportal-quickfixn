@@ -77,13 +77,19 @@ public class SessionDynamicTest
     private HashSet<string> _loggedOnCompIDs = new();
     private Socket? _listenSocket;
 
-    static int FreeTcpPort()
+    private static (int First, int Second, int Third) FreeTcpPorts()
     {
-        using TcpListener l = new TcpListener(IPAddress.Loopback, 0);
-        l.Start();
-        int port = ((IPEndPoint)l.LocalEndpoint).Port;
-        l.Stop();
-        return port;
+        using TcpListener first = new(IPAddress.Loopback, 0);
+        using TcpListener second = new(IPAddress.Loopback, 0);
+        using TcpListener third = new(IPAddress.Loopback, 0);
+        first.Start();
+        second.Start();
+        third.Start();
+        return (
+            ((IPEndPoint)first.LocalEndpoint).Port,
+            ((IPEndPoint)second.LocalEndpoint).Port,
+            ((IPEndPoint)third.LocalEndpoint).Port
+        );
     }
 
     private static SettingsDictionary CreateSessionConfig(bool isInitiator)
@@ -370,9 +376,7 @@ public class SessionDynamicTest
         _loggedOnCompIDs = new HashSet<string>();
         ClearLogs();
 
-        AcceptPort = FreeTcpPort();
-        ConnectPort = AcceptPort + 1;
-        AcceptPort2 = AcceptPort + 2;
+        (AcceptPort, ConnectPort, AcceptPort2) = FreeTcpPorts();
 
     }
 
