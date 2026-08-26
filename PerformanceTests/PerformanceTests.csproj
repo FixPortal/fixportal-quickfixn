@@ -1,0 +1,32 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <Platforms>AnyCPU;x64</Platforms>
+    <IsPackable>false</IsPackable>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Content Include="../spec/FixPortal/7_FIXT11.xml">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <Link>spec/7_FIXT11.xml</Link>
+    </Content>
+    <Content Include="../spec/FixPortal/10_FIX50SP2_FP_QF.xml">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <Link>spec/10_FIX50SP2_FP_QF.xml</Link>
+    </Content>
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="BenchmarkDotNet" Version="0.15.8" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="../Messages/FIX50SP2/QuickFix.FIX50SP2.csproj" />
+    <ProjectReference Include="../Messages/FIXT11/QuickFix.FIXT11.csproj" />
+    <ProjectReference Include="../QuickFIXn/QuickFix.csproj" />
+  </ItemGroup>
+
+</Project>
