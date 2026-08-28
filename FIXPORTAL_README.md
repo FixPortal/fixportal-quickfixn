@@ -34,6 +34,21 @@ For general QuickFIX/n documentation, refer to the upstream `README.md`.
   FixPortal FixAtdl repo). Older `// FixPortal Enhancement` markers and `#region FixPortal Enhancement`
   blocks may still appear in unreviewed corners; convert on touch.
 
+## Performance harness
+
+`PerformanceTests` owns the BenchmarkDotNet workloads for FIX frame parsing and the validated
+message build/validate/crack pipeline. Run the cheap payload correctness check first:
+
+```powershell
+dotnet run --project PerformanceTests/PerformanceTests.csproj --configuration Release -- --check
+```
+
+Run the full measurements manually; workstation timing is not a CI gate:
+
+```powershell
+dotnet run --project PerformanceTests/PerformanceTests.csproj --configuration Release -- --filter '*'
+```
+
 ## Upgrade workflow
 
 When a new upstream release is available (e.g. `v1.15.0`), follow these steps to
