@@ -29,13 +29,15 @@ public abstract class AbstractInitiator : IInitiator
 
     public bool IsStopped { get; private set; } = true;
 
+    // FP Enhancement: 2026-09-01 — initiator construction forwards the optional durable outbound journal.
     protected AbstractInitiator(
         IApplication app,
         IMessageStoreFactory storeFactory,
         SessionSettings settings,
         ILogFactory? logFactoryNullable = null,
         IMessageFactory? messageFactoryNullable = null,
-        IFixWireTap? wireTap = null)
+        IFixWireTap? wireTap = null,
+        IOutboundSendJournal? outboundSendJournal = null)
         : this(
             app,
             storeFactory,
@@ -44,7 +46,8 @@ public abstract class AbstractInitiator : IInitiator
                 ? NullQuickFixLoggerFactory.Instance
                 : new LogFactoryAdapter(logFactoryNullable),
             messageFactoryNullable,
-            wireTap)
+            wireTap,
+            outboundSendJournal)
     { }
 
     protected AbstractInitiator(
@@ -53,7 +56,8 @@ public abstract class AbstractInitiator : IInitiator
         SessionSettings settings,
         ILoggerFactory? loggerFactoryNullable = null,
         IMessageFactory? messageFactoryNullable = null,
-        IFixWireTap? wireTap = null)
+        IFixWireTap? wireTap = null,
+        IOutboundSendJournal? outboundSendJournal = null)
         : this(
             app,
             storeFactory,
@@ -62,7 +66,8 @@ public abstract class AbstractInitiator : IInitiator
                 ? NullQuickFixLoggerFactory.Instance
                 : new MelQuickFixLoggerFactory(loggerFactoryNullable),
             messageFactoryNullable,
-            wireTap)
+            wireTap,
+            outboundSendJournal)
     { }
 
     private AbstractInitiator(
@@ -71,7 +76,8 @@ public abstract class AbstractInitiator : IInitiator
         SessionSettings settings,
         IQuickFixLoggerFactory qfLoggerFactory,
         IMessageFactory? messageFactoryNullable = null,
-        IFixWireTap? wireTap = null)
+        IFixWireTap? wireTap = null,
+        IOutboundSendJournal? outboundSendJournal = null)
     {
         _settings = settings;
         if (qfLoggerFactory is LogFactoryAdapter lfa)
@@ -83,7 +89,7 @@ public abstract class AbstractInitiator : IInitiator
             _logFactoryAdapter = lfa;
         }
         var msgFactory = messageFactoryNullable ?? new DefaultMessageFactory();
-        _sessionFactory = new SessionFactory(app, storeFactory, qfLoggerFactory, msgFactory, wireTap);
+        _sessionFactory = new SessionFactory(app, storeFactory, qfLoggerFactory, msgFactory, wireTap, outboundSendJournal);
         QfLoggerFactory = qfLoggerFactory;
 
         HashSet<SessionID> definedSessions = _settings.GetSessions();

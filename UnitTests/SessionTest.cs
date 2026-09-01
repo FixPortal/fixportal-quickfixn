@@ -16,10 +16,63 @@ public class SessionTest : SessionTestBase
     private readonly Regex _msRegex = new(@"\.[\d]{1,3}$");
     private readonly Regex _microsecondRegex = new(@"\.[\d]{1,6}$");
 
+    private sealed class RejectingStore : IMessageStore
+    {
+        private readonly MemoryStore _inner = new();
+
+        public void Get(SeqNumType startSeqNum, SeqNumType endSeqNum, List<string> messages) => _inner.Get(startSeqNum, endSeqNum, messages);
+        public bool Set(SeqNumType msgSeqNum, string msg) => _inner.Set(msgSeqNum, msg);
+        public SeqNumType NextSenderMsgSeqNum { get => _inner.NextSenderMsgSeqNum; set => _inner.NextSenderMsgSeqNum = value; }
+        public SeqNumType NextTargetMsgSeqNum { get => _inner.NextTargetMsgSeqNum; set => _inner.NextTargetMsgSeqNum = value; }
+        public void IncrNextSenderMsgSeqNum() => _inner.IncrNextSenderMsgSeqNum();
+        public void IncrNextTargetMsgSeqNum() => _inner.IncrNextTargetMsgSeqNum();
+        public bool SetAndIncrNextSenderMsgSeqNum(SeqNumType msgSeqNum, string msg) => false;
+        public DateTime? CreationTime => _inner.CreationTime;
+        public void Reset() => _inner.Reset();
+        public void Refresh() => _inner.Refresh();
+        public void Dispose() => _inner.Dispose();
+    }
+
+    private sealed class SingleStoreFactory(IMessageStore store) : IMessageStoreFactory
+    {
+        public IMessageStore Create(QuickFix.SessionID sessionId) => store;
+    }
+
+    private sealed class CountingJournal : QuickFix.IOutboundSendJournal
+    {
+        public int PrepareCount { get; private set; }
+
+        public QuickFix.OutboundSendJournalToken Prepare(QuickFix.SessionID sessionId, string rawFrame)
+        {
+            PrepareCount++;
+            return new QuickFix.OutboundSendJournalToken("token");
+        }
+
+        public void RecordOutcome(QuickFix.OutboundSendJournalToken token, bool transmitted) { }
+    }
+
     [SetUp]
     public void Setup()
     {
         BaseSetup();
+    }
+
+    [Test]
+    public void Persist_rejection_prevents_journal_and_responder_send()
+    {
+        var journal = new CountingJournal();
+        var responder = new SessionTestSupport.MockResponder();
+        var sessionId = new QuickFix.SessionID("FIX.4.2", "PERSIST_SENDER", "PERSIST_TARGET");
+        using var session = new QuickFix.Session(
+            false, _application, new SingleStoreFactory(new RejectingStore()), sessionId,
+            new QuickFix.DataDictionaryProvider(), new QuickFix.SessionSchedule(_config), 0,
+            new LogFactoryAdapter(new NullLogFactory()), new QuickFix.DefaultMessageFactory(), "blah",
+            outboundSendJournal: journal);
+        session.SetResponder(responder);
+
+        Assert.That(() => session.Send(CreateNOSMessage(1)), Throws.InvalidOperationException);
+        Assert.That(journal.PrepareCount, Is.Zero);
+        Assert.That(responder.GetCount(QuickFix.Fields.MsgType.NEWORDERSINGLE), Is.Zero);
     }
 
     [Test]

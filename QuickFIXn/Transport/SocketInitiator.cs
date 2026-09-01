@@ -32,14 +32,16 @@ public class SocketInitiator : AbstractInitiator
     private bool _disposeConnectionSetupCancellations;
     private readonly ILogger _nonSessionLog;
 
+    // FP Enhancement: 2026-09-01 — expose the optional durable outbound journal through socket initiator construction.
     public SocketInitiator(
         IApplication application,
         IMessageStoreFactory storeFactory,
         SessionSettings settings,
         ILogFactory? logFactoryNullable = null,
         IMessageFactory? messageFactoryNullable = null,
-        IFixWireTap? wireTap = null)
-        : base(application, storeFactory, settings, logFactoryNullable, messageFactoryNullable, wireTap)
+        IFixWireTap? wireTap = null,
+        IOutboundSendJournal? outboundSendJournal = null)
+        : base(application, storeFactory, settings, logFactoryNullable, messageFactoryNullable, wireTap, outboundSendJournal)
     {
         _nonSessionLog = QfLoggerFactory.CreateNonSessionLogger<SocketInitiator>();
     }
@@ -50,8 +52,9 @@ public class SocketInitiator : AbstractInitiator
         SessionSettings settings,
         ILoggerFactory? loggerFactoryNullable = null,
         IMessageFactory? messageFactoryNullable = null,
-        IFixWireTap? wireTap = null)
-        : base(application, storeFactory, settings, loggerFactoryNullable, messageFactoryNullable, wireTap)
+        IFixWireTap? wireTap = null,
+        IOutboundSendJournal? outboundSendJournal = null)
+        : base(application, storeFactory, settings, loggerFactoryNullable, messageFactoryNullable, wireTap, outboundSendJournal)
     {
         _nonSessionLog = QfLoggerFactory.CreateNonSessionLogger<SocketInitiator>();
     }

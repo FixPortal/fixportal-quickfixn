@@ -34,6 +34,8 @@ public class Session : IDisposable
     private readonly bool _appHandlesRejection;
     // FP Enhancement: verbatim wire-frame tap for the engine Tier-2 capture seam (null when not wired). See IFixWireTap.
     private readonly IFixWireTap? _wireTap;
+    // FP Enhancement: 2026-09-01 — optional synchronous durable journal for outbound frames.
+    private readonly IOutboundSendJournal? _outboundSendJournal;
     private readonly System.Collections.Concurrent.ConcurrentDictionary<(bool Outbound, ulong Seq), (int LogId, DateTime CaptureTime)> _resentTracker = new();
     // FP Enhancement: 2026-08-10 — retain successful outbound retransmissions so session Reject callbacks can distinguish replayed frames from first transmissions.
     private readonly object _resentOutboundHistorySync = new();
@@ -257,13 +259,15 @@ public class Session : IDisposable
         IQuickFixLoggerFactory loggerFactory,
         IMessageFactory msgFactory,
         string senderDefaultApplVerId,
-        IFixWireTap? wireTap = null)
+        IFixWireTap? wireTap = null,
+        IOutboundSendJournal? outboundSendJournal = null)
     {
         _schedule = sessionSchedule;
         _msgFactory = msgFactory;
         _appDoesEarlyIntercept = app is IApplicationExt;
         _appHandlesRejection = app is IApplicationMessageRejection;
         _wireTap = wireTap;
+        _outboundSendJournal = outboundSendJournal;
 
         Application = app;
         SessionID = sessId;
@@ -416,12 +420,14 @@ public class Session : IDisposable
     {
         lock (_sync)
         {
+            OutboundSendJournalToken? token = _outboundSendJournal?.Prepare(SessionID, message);
             // A-F5 / M1: tap fires for every generated outbound frame, including phantom sends
             // (when _responder is null or Send returns false). The transmitted flag tells the
             // engine adapter whether the frame reached the wire, so it can mark the capture row
             // accordingly rather than relying solely on the reconciliation arm.
             if (_responder is null)
             {
+                RecordJournalOutcome(token, transmitted: false);
                 TapOutbound(message, transmitted: false);
                 return false;
             }
@@ -439,6 +445,7 @@ public class Session : IDisposable
             }
 
             bool transmitted = _responder.Send(message);
+            RecordJournalOutcome(token, transmitted);
             TapOutbound(message, transmitted);
             return transmitted;
         }
@@ -698,6 +705,21 @@ public class Session : IDisposable
         catch (Exception e)
         {
             Log.Log(LogLevel.Warning, "FIX wire-tap OnOutbound threw and was suppressed: {Error}", e.Message);
+        }
+    }
+
+    // FP Enhancement: 2026-09-01 — journal outcome failures are diagnostic only; the responder result wins.
+    private void RecordJournalOutcome(OutboundSendJournalToken? token, bool transmitted)
+    {
+        if (token is null)
+            return;
+        try
+        {
+            _outboundSendJournal!.RecordOutcome(token.Value, transmitted);
+        }
+        catch (Exception e)
+        {
+            Log.Log(LogLevel.Warning, "Outbound send journal RecordOutcome threw and was suppressed: {Error}", e.Message);
         }
     }
 
@@ -2013,12 +2035,12 @@ public class Session : IDisposable
         if (PersistMessages)
         {
             SeqNumType msgSeqNum = message.Header.GetULong(Fields.Tags.MsgSeqNum);
-            _state.SetAndIncrNextSenderMsgSeqNum(msgSeqNum, messageString);
+            if (!_state.SetAndIncrNextSenderMsgSeqNum(msgSeqNum, messageString))
+                throw new InvalidOperationException($"Message store rejected outbound sequence {msgSeqNum} for {SessionID}.");
+            return;
         }
-        else
-        {
-            _state.IncrNextSenderMsgSeqNum();
-        }
+
+        _state.IncrNextSenderMsgSeqNum();
     }
 
     protected bool IsGoodTime(Message msg)
