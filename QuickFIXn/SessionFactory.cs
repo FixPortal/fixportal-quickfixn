@@ -20,13 +20,16 @@ public class SessionFactory
     // FP Enhancement: optional verbatim wire-frame capture seam, threaded onto every Session this
     // factory creates. Null (the default) leaves FIX processing untouched.
     private readonly IFixWireTap? _wireTap;
+    // FP Enhancement: 2026-09-01 — durable outbound journal threaded into every created session.
+    private readonly IOutboundSendJournal? _outboundSendJournal;
 
     internal SessionFactory(
         IApplication app,
         IMessageStoreFactory storeFactory,
         IQuickFixLoggerFactory? loggerFactory = null,
         IMessageFactory? messageFactory = null,
-        IFixWireTap? wireTap = null)
+        IFixWireTap? wireTap = null,
+        IOutboundSendJournal? outboundSendJournal = null)
     {
         // TODO: for V2, consider ONLY instantiating MessageFactory in the Create() method,
         //   and removing instance var _messageFactory altogether.
@@ -39,6 +42,7 @@ public class SessionFactory
         _loggerFactory = loggerFactory ?? NullQuickFixLoggerFactory.Instance;
         _messageFactory = messageFactory ?? new DefaultMessageFactory();
         _wireTap = wireTap;
+        _outboundSendJournal = outboundSendJournal;
     }
 
     private static bool DetectIfInitiator(SettingsDictionary settings)
@@ -123,7 +127,8 @@ public class SessionFactory
             _loggerFactory,
             sessionMsgFactory,
             senderDefaultApplVerId,
-            _wireTap);
+            _wireTap,
+            _outboundSendJournal);
 
         if (settings.Has("Encoding")){
             CharEncoding.SetEncoding(settings.GetString(SessionSettings.ENCODING));

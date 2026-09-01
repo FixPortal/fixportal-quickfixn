@@ -26,6 +26,7 @@ public class ThreadedSocketAcceptor : IAcceptor
     private readonly IQuickFixLoggerFactory _qfLoggerFactory;
     private readonly LogFactoryAdapter? _logFactoryAdapter;
 
+    // FP Enhancement: 2026-09-01 — expose the optional durable outbound journal through acceptor construction.
     /// <summary>
     /// Create a ThreadedSocketAcceptor (with a legacy ILogFactory)
     /// </summary>
@@ -35,20 +36,23 @@ public class ThreadedSocketAcceptor : IAcceptor
     /// <param name="logFactory">If null, a NullQuickFixLoggerFactory (which produces no logs) will be used.</param>
     /// <param name="messageFactory">If null, a DefaultMessageFactory will be created (using settings parameters)</param>
     /// <param name="wireTap">Optional observer for raw FIX wire traffic.</param>
+    /// <param name="outboundSendJournal">Optional durable journal for outbound FIX frames.</param>
     public ThreadedSocketAcceptor(
         IApplication application,
         IMessageStoreFactory storeFactory,
         SessionSettings settings,
         ILogFactory? logFactory = null,
         IMessageFactory? messageFactory = null,
-        IFixWireTap? wireTap = null)
+        IFixWireTap? wireTap = null,
+        IOutboundSendJournal? outboundSendJournal = null)
         : this(
             application,
             storeFactory,
             settings,
             logFactory is null ? NullQuickFixLoggerFactory.Instance : new LogFactoryAdapter(logFactory),
             messageFactory,
-            wireTap)
+            wireTap,
+            outboundSendJournal)
     { }
 
     /// <summary>
@@ -60,13 +64,15 @@ public class ThreadedSocketAcceptor : IAcceptor
     /// <param name="loggerFactory">If null, a NullQuickFixLoggerFactory (which produces no logs) will be used.</param>
     /// <param name="messageFactory">If null, a DefaultMessageFactory will be created (using settings parameters)</param>
     /// <param name="wireTap">Optional observer for raw FIX wire traffic.</param>
+    /// <param name="outboundSendJournal">Optional durable journal for outbound FIX frames.</param>
     public ThreadedSocketAcceptor(
         IApplication application,
         IMessageStoreFactory storeFactory,
         SessionSettings settings,
         ILoggerFactory? loggerFactory = null,
         IMessageFactory? messageFactory = null,
-        IFixWireTap? wireTap = null)
+        IFixWireTap? wireTap = null,
+        IOutboundSendJournal? outboundSendJournal = null)
         : this(
             application,
             storeFactory,
@@ -75,7 +81,8 @@ public class ThreadedSocketAcceptor : IAcceptor
                 ? NullQuickFixLoggerFactory.Instance
                 : new MelQuickFixLoggerFactory(loggerFactory),
             messageFactory,
-            wireTap)
+            wireTap,
+            outboundSendJournal)
     { }
 
     private ThreadedSocketAcceptor(
@@ -84,7 +91,8 @@ public class ThreadedSocketAcceptor : IAcceptor
         SessionSettings settings,
         IQuickFixLoggerFactory qfLoggerFactory,
         IMessageFactory? messageFactory = null,
-        IFixWireTap? wireTap = null)
+        IFixWireTap? wireTap = null,
+        IOutboundSendJournal? outboundSendJournal = null)
     {
         if (qfLoggerFactory is LogFactoryAdapter lfa)
         {
@@ -96,7 +104,7 @@ public class ThreadedSocketAcceptor : IAcceptor
         }
         IMessageFactory mf = messageFactory ?? new DefaultMessageFactory();
         _settings = settings;
-        _sessionFactory = new SessionFactory(application, storeFactory, qfLoggerFactory, mf, wireTap);
+        _sessionFactory = new SessionFactory(application, storeFactory, qfLoggerFactory, mf, wireTap, outboundSendJournal);
         _qfLoggerFactory = qfLoggerFactory;
 
         try
