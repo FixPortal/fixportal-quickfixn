@@ -33,6 +33,7 @@ resolve a reusable workflow in another repository, and pinning is checked by SHA
 """
 
 import os
+import re
 import sys
 from pathlib import Path
 
@@ -273,18 +274,24 @@ def check_ref(job, ref, origin, unpinned):
     if is_pinned(ref):
         return False, unpinned
 
-    # actions/* is GitHub's own namespace, and a mutable tag there means trusting
-    # GitHub -- which every workflow already does by running on their runners. A
-    # third-party mutable tag means trusting that owner forever, with no re-review
-    # when they move it. Only the second is gated. Measured 2026-08-19 across 28
-    # estate repos: 319 unpinned refs, every one sampled `actions/*` -- a hard gate on
-    # all owners would have failed 27 of 28 repos on their next PR.
+    # actions/* is GitHub's own namespace, and the house standard is the INVERSE of
+    # the third-party rule: first-party actions take the major tag, and audit-ci
+    # grades a SHA-pinned first-party action as drift. "Take the major tag" is
+    # enforced here, not assumed -- a branch ref (actions/checkout@main) or a bare
+    # action name is just as mutable as an unpinned third-party tag and can change
+    # after review.
     if ref.startswith("actions/"):
+        revision = ref.rsplit("@", 1)[1] if "@" in ref else ""
+        if re.fullmatch(r"v\d+(\.\d+)*", revision):
+            # Conformant -- a vN release tag (major or dotted minor/patch). Counted
+            # only so the summary shows the split.
+            return False, unpinned + 1
         print(
-            f"::notice file={origin}::'{ref}' ({job}) is not SHA-pinned. First-party "
-            "(GitHub) action, so not failed -- pin it when convenient."
+            f"::error file={origin}::First-party action '{ref}' ({job}) is not on "
+            "the vN major tag. A branch ref or a bare action name is mutable and can "
+            "change after review."
         )
-        return False, unpinned + 1
+        return True, unpinned
 
     print(
         f"::error file={origin}::Third-party action or image '{ref}' ({job}) is not "
