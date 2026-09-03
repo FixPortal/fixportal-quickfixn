@@ -39,10 +39,17 @@ from pathlib import Path
 try:
     import yaml
 except ImportError:
-    sys.exit(
+    # Exit 2, not 1. `sys.exit("message")` prints the message and exits ONE, which this
+    # script reserves for a hard workflow violation -- so a runner image missing PyYAML
+    # reported as though the workflows themselves were bad, sending whoever read the
+    # check into the diff instead of the runner. main() already returns 2 for its other
+    # two "could not run" conditions; this is the third.
+    print(
         "python3 cannot import yaml. Provide PyYAML in the runner image rather than "
-        "installing it at CI time -- this script gates merges."
+        "installing it at CI time -- this script gates merges.",
+        file=sys.stderr,
     )
+    sys.exit(2)
 
 WORKFLOWS = Path(".github/workflows")
 SHA_LEN = 40
@@ -180,6 +187,17 @@ def is_pinned(ref):
     return len(revision) == SHA_LEN and all(char in "0123456789abcdef" for char in revision)
 
 
+def is_reusable_workflow_ref(ref):
+    """True when a local `./` ref calls a reusable workflow rather than an action.
+
+    GitHub draws this by shape: a reusable-workflow call names a YAML FILE, an action
+    names a DIRECTORY containing action.yml. `action_refs` deliberately collects
+    job-level `uses:` for pin checking, so the manifest lookup downstream has to tell
+    the two apart or it demands action.yml from a reusable workflow that never has one.
+    """
+    return ref.lower().endswith((".yml", ".yaml"))
+
+
 def local_manifest(ref):
     """Path to the action manifest for a local `./` ref, or None when not found.
 
@@ -218,7 +236,33 @@ def check_ref(job, ref, origin, unpinned):
     owner = ref.split("@", 1)[0]
     third_party = not ref.startswith(("actions/", "./", "docker://"))
 
-    if TRUSTED_THIRD_PARTY_ACTIONS and third_party and owner not in TRUSTED_THIRD_PARTY_ACTIONS:
+    # The allowlist names ACTIONS by `owner/repo`, so it must only gate action refs.
+    # `action_refs` also yields container and service IMAGES, which reach here as bare
+    # names (`postgres@sha256:...`, `mcr.microsoft.com/mssql/server:2022-latest`) and
+    # therefore satisfy `third_party` too. Because the allowlist test runs BEFORE
+    # is_pinned, a correctly digest-pinned image was rejected for not appearing in an
+    # allowlist it could never legitimately be in.
+    #
+    # Three tells, and the DIGEST is the load-bearing one. A registry host (dot in the
+    # first segment) and a port or tag colon both catch `mcr.microsoft.com/...`, but
+    # neither catches a Docker Hub org image like `bitnami/postgresql@sha256:...` --
+    # no dot, no colon, and `bitnami/postgresql` is exactly action-shaped. Only images
+    # pin with an `@sha256:` digest; an action pins to a bare 40-hex commit. So the
+    # digest settles the cases the other two miss.
+    revision = ref.split("@", 1)[1] if "@" in ref else ""
+    action_shaped = (
+        not revision.startswith("sha256:")
+        and "/" in owner
+        and "." not in owner.split("/", 1)[0]
+        and ":" not in owner
+    )
+
+    if (
+        TRUSTED_THIRD_PARTY_ACTIONS
+        and third_party
+        and action_shaped
+        and owner not in TRUSTED_THIRD_PARTY_ACTIONS
+    ):
         print(
             f"::error file={origin}::Third-party action '{ref}' ({job}) is not in "
             "TRUSTED_THIRD_PARTY_ACTIONS. Add it there with a written rationale, or "
@@ -322,6 +366,21 @@ def main():
             failed = failed or bad
 
             if not ref.startswith("./"):
+                continue
+            # A local `./` ref is one of two different things, and only one of them has
+            # an action manifest. A reusable WORKFLOW call names a FILE
+            # (`./.github/workflows/_deploy.yml`); a composite ACTION names a DIRECTORY
+            # holding action.yml. Demanding a manifest from the first is a false
+            # failure -- and because `Review policy intact` is a required check, it
+            # makes every repo using a reusable deploy workflow unmergeable. The
+            # extension is the distinction GitHub itself draws, so it is what we test.
+            if is_reusable_workflow_ref(ref):
+                if not Path(ref).is_file():
+                    print(
+                        f"::error file={path}::Reusable workflow '{ref}' ({job}) does not "
+                        "exist. The ref cannot resolve at run time."
+                    )
+                    failed = True
                 continue
             manifest = local_manifest(ref)
             if manifest is None:
