@@ -83,6 +83,15 @@ STEP_IF_VALUE = re.compile(r"""^(\s{5,}(?:-\s+)?)(?:'if'|"if"|if)\s*:\s*(.*?)\s*
 # conditioned on" failure. Rare shape, but the failure direction is a false RED on
 # correct configuration.
 BLOCK_SCALAR = re.compile(r"^[|>](?:[0-9][+-]?|[+-][0-9]?)?$")
+# Any OTHER step-body key that opens a block scalar (`run: |`, `run: >-`, ...). Its
+# payload is arbitrary text -- a heredoc/echo line shaped like `if: contains(...)`
+# inside a `run:` body is not a real YAML key, but STEP_IF_VALUE cannot tell the
+# difference by itself. Used to skip such spans wholesale before they reach
+# STEP_IF_VALUE. Group 1 is the key's own indent prefix, same convention as
+# STEP_IF_VALUE, so the span ends the same way: content must out-indent it.
+OTHER_BLOCK_KEY = re.compile(
+    r"""^(\s{5,}(?:-\s+)?)[A-Za-z_][A-Za-z0-9_-]*\s*:\s*[|>](?:[0-9][+-]?|[+-][0-9]?)?\s*$"""
+)
 
 
 def _first_group(match):
@@ -206,30 +215,63 @@ def normalise_condition(value):
 
 
 def step_conditions(block):
-    """Every step-level `if:` condition in a job body, block scalars included."""
-    for index, line in enumerate(block):
-        match = STEP_IF_VALUE.match(line)
-        if not match:
-            continue
-        value = strip_comment(match.group(2)).strip()
-        if value and not BLOCK_SCALAR.match(value):
-            yield value
-            continue
-        # An empty value or a block-scalar indicator: the condition is on the following
-        # lines, which are indented past the `if:` KEY -- its own column, not the line's.
-        # Measuring the line put the bar at the dash of a `- if: >-` step, so the sibling
-        # `run:` at the key's column and its whole body were absorbed into the condition. A
-        # gate folded to `false` with the diagnostic echo of `join(needs.*.result, ', ')`
-        # below it then passed, which is the fail-OPEN shape this check exists to reject.
-        indent = len(match.group(1))
-        continuation = []
-        for following in block[index + 1 :]:
-            if COMMENT_OR_BLANK.match(following):
+    """Every step-level `if:` condition in a job body, block scalars included.
+
+    A preceding step's own block scalar (`run: |`, `run: >-`, ...) is skipped
+    wholesale before its lines ever reach STEP_IF_VALUE: its payload is arbitrary
+    text, and a heredoc/echo line shaped like `if: contains(needs.*.result, ...)`
+    is not a real YAML key. Without this, deleting the actual step-level `if:`
+    while a diagnostic `run:` body still echoed a `needs.*.result`-shaped string
+    let the gate keep reporting a condition that no longer existed -- the same
+    fail-OPEN shape assert_gate_semantics's own docstring already documents for a
+    different line. Found by CodeRabbit on fixportal-quickfixn#68.
+    """
+    index = 0
+    skip_until_indent = None
+    while index < len(block):
+        line = block[index]
+
+        if skip_until_indent is not None:
+            if COMMENT_OR_BLANK.match(line) or len(line) - len(line.lstrip()) > skip_until_indent:
+                index += 1
                 continue
-            if len(following) - len(following.lstrip()) <= indent:
-                break
-            continuation.append(strip_comment(following).strip())
-        yield " ".join(continuation)
+            skip_until_indent = None
+            # Fall through: this line is back at or above the opener's indent, so it
+            # may itself be a real `if:` (or another block-scalar opener) and must be
+            # examined normally rather than skipped.
+
+        match = STEP_IF_VALUE.match(line)
+        if match:
+            value = strip_comment(match.group(2)).strip()
+            if value and not BLOCK_SCALAR.match(value):
+                yield value
+                index += 1
+                continue
+            # An empty value or a block-scalar indicator: the condition is on the
+            # following lines, indented past the `if:` KEY -- its own column, not the
+            # line's. Measuring the line put the bar at the dash of a `- if: >-` step,
+            # so the sibling `run:` at the key's column and its whole body were
+            # absorbed into the condition.
+            indent = len(match.group(1))
+            continuation = []
+            following_index = index + 1
+            while following_index < len(block):
+                following = block[following_index]
+                if COMMENT_OR_BLANK.match(following):
+                    following_index += 1
+                    continue
+                if len(following) - len(following.lstrip()) <= indent:
+                    break
+                continuation.append(strip_comment(following).strip())
+                following_index += 1
+            yield " ".join(continuation)
+            index = following_index
+            continue
+
+        other_block = OTHER_BLOCK_KEY.match(line)
+        if other_block:
+            skip_until_indent = len(other_block.group(1))
+        index += 1
 
 
 def assert_gate_semantics(workflow_path, lines, jobs, gate_job):
