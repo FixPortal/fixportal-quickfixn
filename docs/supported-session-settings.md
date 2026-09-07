@@ -30,7 +30,7 @@ QuickFIX/n session configuration is a `.cfg` file with one `[DEFAULT]` section a
 | `SocketConnectPort<N>` | SESSION | int | No | Failover port paired with the same `<N>` suffix |
 | `SocketAcceptHost` | SESSION | string | No | Acceptor only. Bind address (default: all interfaces) |
 | `SocketAcceptPort` | SESSION | int | Acceptor | Acceptor only. Listen TCP port |
-| `ReconnectInterval` | DEFAULT/SESSION | int | No | Initiator reconnect delay in seconds (default: `30`) |
+| `ReconnectInterval` | DEFAULT/SESSION | positive int | No | Initiator reconnect delay in seconds (default: `30`); zero, negative and non-integer values are rejected |
 
 ---
 
