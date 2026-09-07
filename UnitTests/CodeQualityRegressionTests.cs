@@ -53,6 +53,8 @@ public class CodeQualityRegressionTests
     }
 
     [TestCase("invalid")]
+    [TestCase("0")]
+    [TestCase("-1")]
     [TestCase("2147483648")]
     [TestCase("99999999999999999999")]
     public void InvalidReconnectIntervalFailsConfiguration(string value)
@@ -64,6 +66,8 @@ public class CodeQualityRegressionTests
     }
 
     [TestCase(null, 30)]
+    [TestCase("1", 1)]
+    [TestCase("2147483647", int.MaxValue)]
     [TestCase("60", 60)]
     public void OptionalReconnectIntervalKeepsItsDefaultOrConfiguredValue(string? value, int expected)
     {

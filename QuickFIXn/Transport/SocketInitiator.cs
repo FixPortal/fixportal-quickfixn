@@ -248,8 +248,8 @@ public class SocketInitiator : AbstractInitiator
         SettingsDictionary defaults = settings.Get();
         if (defaults.Has(SessionSettings.RECONNECT_INTERVAL))
         {
-            if (!int.TryParse(defaults.GetString(SessionSettings.RECONNECT_INTERVAL), out int interval))
-                throw new ConfigError("ReconnectInterval must be a 32-bit integer");
+            if (!int.TryParse(defaults.GetString(SessionSettings.RECONNECT_INTERVAL), out int interval) || interval <= 0)
+                throw new ConfigError("ReconnectInterval must be a positive 32-bit integer");
             _reconnectInterval = interval;
         }
 
