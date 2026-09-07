@@ -244,6 +244,15 @@ public class SocketInitiator : AbstractInitiator
     /// <param name="settings"></param>
     protected override void OnConfigure(SessionSettings settings)
     {
+        // FP Enhancement: 2026-09-07 — validate a supplied reconnect interval before changing lifecycle state.
+        SettingsDictionary defaults = settings.Get();
+        if (defaults.Has(SessionSettings.RECONNECT_INTERVAL))
+        {
+            if (!int.TryParse(defaults.GetString(SessionSettings.RECONNECT_INTERVAL), out int interval))
+                throw new ConfigError("ReconnectInterval must be a 32-bit integer");
+            _reconnectInterval = interval;
+        }
+
         CancellationTokenSource previousCancellation;
         bool disposePrevious;
         lock (_connectRequestSync)
@@ -255,13 +264,6 @@ public class SocketInitiator : AbstractInitiator
         }
         if (disposePrevious)
             previousCancellation.Dispose();
-
-        try
-        {
-            _reconnectInterval = Convert.ToInt32(settings.Get().GetLong(SessionSettings.RECONNECT_INTERVAL));
-        }
-        catch (Exception)
-        { }
 
         // TODO: Don't know if this is required in order to handle settings in the general section
         _socketSettings.Configure(settings.Get());

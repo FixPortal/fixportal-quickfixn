@@ -116,7 +116,8 @@ public class SessionSettings
         }
         catch (System.Exception e)
         {
-            throw new ConfigError($"File {file} not found ({e.Message})");
+            // FP Enhancement: 2026-09-07 — retain the cause of both file-open and configuration-parse failures.
+            throw new ConfigError($"Could not load settings from {file} ({e.Message})", e);
         }
     }
 
