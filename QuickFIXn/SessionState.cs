@@ -240,7 +240,8 @@ public class SessionState : IDisposable
     public static bool NeedTestRequest(DateTime now, int heartBtIntMillis, DateTime lastReceivedTime, int testRequestCounter)
     {
         double elapsedMilliseconds = now.Subtract(lastReceivedTime).TotalMilliseconds;
-        return elapsedMilliseconds >= (1.2 * ((testRequestCounter + 1) * heartBtIntMillis));
+        // FP Enhancement: 2026-09-07 — promote before addition and multiplication to avoid integer overflow.
+        return elapsedMilliseconds >= (1.2 * (testRequestCounter + 1.0) * heartBtIntMillis);
     }
     public bool NeedTestRequest()
     {

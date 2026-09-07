@@ -5,6 +5,7 @@ using System.Threading;
 using System.Net;
 using System.Net.Sockets;
 using System.Text.RegularExpressions;
+using AwesomeAssertions;
 using NUnit.Framework;
 using QuickFix;
 using QuickFix.Logger;
@@ -178,24 +179,54 @@ public class SessionDynamicTest
         _listenSocket = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp);
         _listenSocket.Bind(listenEndpoint);
         _listenSocket.Listen(10);
-        _listenSocket.BeginAccept(ProcessInboundConnect, null);
+        _listenSocket.BeginAccept(ProcessInboundConnect, _listenSocket);
     }
 
     private void ProcessInboundConnect(IAsyncResult ar)
     {
-        if (_listenSocket == null)
-            return;
-
+        // FP Enhancement: 2026-09-07 — an old callback owns its original listener, never a replacement.
+        var listener = (Socket)ar.AsyncState!;
+        Socket? handler = null;
         try
         {
-            Socket handler = _listenSocket.EndAccept(ar);
+            handler = listener.EndAccept(ar);
             ReceiveAsync(new SocketState(handler));
-            _listenSocket.BeginAccept(ProcessInboundConnect, null);
+            listener.BeginAccept(ProcessInboundConnect, listener);
+            handler = null; // The receive callback now owns the accepted socket.
         }
-        catch
+        catch (ObjectDisposedException)
         {
-            _listenSocket = null; // Assume listener has been closed
+            // Expected when teardown closes this listener.
         }
+        catch (SocketException) when (listener.SafeHandle.IsClosed)
+        {
+            // A pending accept may complete as an aborted socket operation during teardown.
+        }
+        catch (Exception ex)
+        {
+            TestContext.Error.WriteLine($"Inbound test connection failed: {ex}");
+        }
+        finally
+        {
+            handler?.Dispose();
+        }
+    }
+
+    [Test]
+    public void ClosedListenerCallbackDoesNotForgetReplacementListener()
+    {
+        using var original = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp);
+        original.Bind(new IPEndPoint(IPAddress.Loopback, 0));
+        original.Listen(1);
+        var pending = original.BeginAccept(null, original);
+        original.Dispose();
+        using var completed = pending.AsyncWaitHandle;
+        completed.WaitOne(5000).Should().BeTrue();
+
+        using var replacement = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp);
+        _listenSocket = replacement;
+        ProcessInboundConnect(pending);
+        _listenSocket.Should().BeSameAs(replacement);
     }
 
     void ProcessRxData(IAsyncResult ar)
@@ -270,6 +301,7 @@ public class SessionDynamicTest
         }
         catch (Exception ex)
         {
+            socket.Dispose();
             string errorMsg = $"Failed to connect: {ex.Message}";
             if (numRetries > 0)
             {
