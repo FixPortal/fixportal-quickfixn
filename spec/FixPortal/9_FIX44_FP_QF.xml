@@ -948,6 +948,22 @@
 			<field name="ClOrdLinkID" required="N" />
 			<component name="Parties" required="N" />
 			<field name="TradeDate" required="N" />
+			<field name="FpSimStrategyIdentifier" required="N" />
+			<field name="FpSimStrategyVersion" required="N" />
+			<field name="FpSimResponseTimeMin" required="N" />
+			<field name="FpSimResponseTimeMax" required="N" />
+			<field name="FpSimAcceptPercent" required="N" />
+			<field name="FpSimErrorPercent" required="N" />
+			<field name="FpSimFillCountMin" required="N" />
+			<field name="FpSimFillCountMax" required="N" />
+			<field name="FpSimFillStaggerTimeMin" required="N" />
+			<field name="FpSimFillStaggerTimeMax" required="N" />
+			<field name="FpSimFillTimeMin" required="N" />
+			<field name="FpSimFillTimeMax" required="N" />
+			<field name="FpSimAutoAcknowledge" required="N" />
+			<field name="FpSimAutoAcceptCancels" required="N" />
+			<field name="FpSimAutoAcceptReplaces" required="N" />
+			<field name="FpSimRejectInboundOrders" required="N" />
 			<field name="LocateBroker" required="N" />
 			<field name="LocateIdentifier" required="N" />
 			<field name="Account" required="N" />
@@ -9611,6 +9627,22 @@
 			<value enum="N" description="NO" />
 			<value enum="Y" description="YES" />
 		</field>
+		<field number="5001" name="FpSimStrategyIdentifier" type="STRING" />
+		<field number="5099" name="FpSimStrategyVersion" type="STRING" />
+		<field number="5100" name="FpSimResponseTimeMin" type="INT" />
+		<field number="5101" name="FpSimResponseTimeMax" type="INT" />
+		<field number="5102" name="FpSimAcceptPercent" type="FLOAT" />
+		<field number="5103" name="FpSimErrorPercent" type="FLOAT" />
+		<field number="5104" name="FpSimFillCountMin" type="INT" />
+		<field number="5105" name="FpSimFillCountMax" type="INT" />
+		<field number="5106" name="FpSimFillStaggerTimeMin" type="INT" />
+		<field number="5107" name="FpSimFillStaggerTimeMax" type="INT" />
+		<field number="5108" name="FpSimFillTimeMin" type="INT" />
+		<field number="5109" name="FpSimFillTimeMax" type="INT" />
+		<field number="5110" name="FpSimAutoAcknowledge" type="CHAR" />
+		<field number="5111" name="FpSimAutoAcceptCancels" type="CHAR" />
+		<field number="5112" name="FpSimAutoAcceptReplaces" type="CHAR" />
+		<field number="5113" name="FpSimRejectInboundOrders" type="CHAR" />
 		<field number="5700" name="LocateBroker" type="STRING" />
 		<field number="5701" name="LocateIdentifier" type="STRING" />
 		<field number="5798" name="DayCount" type="INT">
