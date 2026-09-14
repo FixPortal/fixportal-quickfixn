@@ -444,7 +444,22 @@ public class Session : IDisposable
                 }
             }
 
-            bool transmitted = _responder.Send(message);
+            bool transmitted;
+            try
+            {
+                transmitted = _responder.Send(message);
+            }
+            catch
+            {
+                // FP Enhancement: 2026-09-14 — the send threw, so we cannot say whether bytes
+                // reached the counterparty. Previously nothing was recorded at all and the
+                // prepared row stayed unresolved, stalling the journal's publishable prefix
+                // for this session. Record the uncertainty, then let the exception continue to
+                // the caller unchanged.
+                RecordJournalOutcome(token, OutboundSendDisposition.Unknown);
+                throw;
+            }
+
             RecordJournalOutcome(token, transmitted);
             TapOutbound(message, transmitted);
             return transmitted;
@@ -709,16 +724,24 @@ public class Session : IDisposable
     }
 
     // FP Enhancement: 2026-09-01 — journal outcome failures are diagnostic only; the responder result wins.
-    private void RecordJournalOutcome(OutboundSendJournalToken? token, bool transmitted)
+    private void RecordJournalOutcome(OutboundSendJournalToken? token, bool transmitted) =>
+        RecordJournalOutcome(
+            token,
+            transmitted ? OutboundSendDisposition.Transmitted : OutboundSendDisposition.NotTransmitted);
+
+    private void RecordJournalOutcome(OutboundSendJournalToken? token, OutboundSendDisposition disposition)
     {
         if (token is null)
             return;
         try
         {
-            _outboundSendJournal!.RecordOutcome(token.Value, transmitted);
+            _outboundSendJournal!.RecordOutcome(token.Value, disposition);
         }
         catch (Exception e)
         {
+            // Suppression matters most on the Unknown path: that call runs inside a catch that
+            // is about to rethrow the responder's exception, and letting the journal's failure
+            // escape would replace the reason the send actually failed.
             Log.Log(LogLevel.Warning, "Outbound send journal RecordOutcome threw and was suppressed: {Error}", e.Message);
         }
     }
