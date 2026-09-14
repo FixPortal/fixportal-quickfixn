@@ -35,9 +35,20 @@ public class OutboundSendJournalTest
             return token;
         }
 
-        public void RecordOutcome(OutboundSendJournalToken token, bool transmitted)
+        public void RecordOutcome(OutboundSendJournalToken token, bool transmitted) =>
+            RecordOutcome(
+                token,
+                transmitted ? OutboundSendDisposition.Transmitted : OutboundSendDisposition.NotTransmitted);
+
+        // Opted into the three-state overload, so an uncertain send is recorded as such.
+        public void RecordOutcome(OutboundSendJournalToken token, OutboundSendDisposition disposition)
         {
-            Calls.Add($"outcome:{transmitted}");
+            Calls.Add(disposition switch
+            {
+                OutboundSendDisposition.Transmitted => "outcome:True",
+                OutboundSendDisposition.NotTransmitted => "outcome:False",
+                _ => "outcome:Unknown",
+            });
             OutcomeTokens.Add(token);
             if (FailOutcome)
                 throw new InvalidOperationException("outcome failed");
@@ -50,6 +61,25 @@ public class OutboundSendJournalTest
             PreparedTokens.Clear();
             OutcomeTokens.Clear();
         }
+    }
+
+    /// <summary>
+    /// An implementer written against the original boolean-only contract, which has not
+    /// overridden the disposition overload. Proves the interface default cannot invent a
+    /// definite answer on its behalf.
+    /// </summary>
+    private sealed class LegacyBooleanJournal : IOutboundSendJournal
+    {
+        public List<string> Calls { get; } = [];
+
+        public OutboundSendJournalToken Prepare(SessionID sessionId, string rawFrame)
+        {
+            Calls.Add("prepare");
+            return new OutboundSendJournalToken("legacy-token");
+        }
+
+        public void RecordOutcome(OutboundSendJournalToken token, bool transmitted) =>
+            Calls.Add($"outcome:{transmitted}");
     }
 
     private sealed class CountingResponder : IResponder
@@ -171,15 +201,52 @@ public class OutboundSendJournalTest
     }
 
     [Test]
-    public void Responder_failure_leaves_prepared_frame_unresolved()
+    public void Responder_failure_records_an_unknown_outcome()
     {
+        // A throwing responder may or may not have put bytes on the wire, so neither `true`
+        // nor `false` is honest. This used to record NOTHING, leaving the prepared row
+        // unresolved forever — and a journal whose publishable prefix stops at the first
+        // unfinalised ordinal then stalls that session's stream until an external recovery
+        // pass notices. Unknown is the outcome; the exception still propagates to the caller.
         var journal = new RecordingJournal();
         var responder = new CountingResponder(throwOnSend: true);
         using var session = BuildSession(journal, responder);
 
         Assert.That(() => session.Send(RawHeartbeat), Throws.InvalidOperationException);
         Assert.That(responder.SendCount, Is.EqualTo(1));
+        Assert.That(journal.Calls, Is.EqualTo(new[] { "prepare", "outcome:Unknown" }));
+        Assert.That(journal.OutcomeTokens, Is.EqualTo(journal.PreparedTokens));
+    }
+
+    [Test]
+    public void Legacy_boolean_only_journal_is_not_told_a_throwing_send_failed()
+    {
+        // An implementer that never opted into the disposition overload cannot express
+        // Unknown. Degrading it to `false` would assert the frame never reached the venue —
+        // the claim that turns an uncertain send into a duplicate order downstream. The
+        // default leaves the row unresolved, exactly as before this change.
+        var journal = new LegacyBooleanJournal();
+        var responder = new CountingResponder(throwOnSend: true);
+        using var session = BuildSession(journal, responder);
+
+        Assert.That(() => session.Send(RawHeartbeat), Throws.InvalidOperationException);
         Assert.That(journal.Calls, Is.EqualTo(new[] { "prepare" }));
+    }
+
+    [Test]
+    public void Outcome_failure_on_a_throwing_send_does_not_mask_the_send_exception()
+    {
+        // The journal's own failure must not replace the responder's. RecordJournalOutcome
+        // already suppresses its exceptions; this pins that the suppression holds on the
+        // newly-added exceptional path too, so the caller still sees why the send failed.
+        var journal = new RecordingJournal { FailOutcome = true };
+        var responder = new CountingResponder(throwOnSend: true);
+        using var session = BuildSession(journal, responder);
+
+        Assert.That(
+            () => session.Send(RawHeartbeat),
+            Throws.InvalidOperationException.With.Message.EqualTo("responder failed"));
+        Assert.That(journal.Calls, Is.EqualTo(new[] { "prepare", "outcome:Unknown" }));
     }
 
     [Test]
