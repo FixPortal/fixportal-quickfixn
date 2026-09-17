@@ -495,6 +495,18 @@ public class Session : IDisposable
                 if (!outcomeRecorded)
                 {
                     RecordJournalOutcome(token, escapeDisposition);
+                    if (escapeDisposition == OutboundSendDisposition.NotTransmitted)
+                    {
+                        // The tap as well as the outcome. The engine's journal captures the frame
+                        // only for Unknown, reasoning that a definite outcome means QuickFIX/n
+                        // already reached its own wire tap — true everywhere except here, because
+                        // this escape jumps over the tap call above. Recording a definite outcome
+                        // without tapping also finalises the emission row, which puts it out of
+                        // reach of the recovery sweep's capture, so the frame would end up with no
+                        // audit row at all — the exact loss this block exists to prevent. Mirrors
+                        // the null-responder branch, which likewise records false and taps.
+                        TapOutbound(message, transmitted: false);
+                    }
                 }
             }
         }
