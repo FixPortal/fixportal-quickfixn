@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using Microsoft.Extensions.Logging;
 using NUnit.Framework;
 using QuickFix;
 using QuickFix.Fields;
@@ -106,7 +107,33 @@ public class OutboundSendJournalTest
         public void Disconnect() { }
     }
 
-    private static Session BuildSession(IOutboundSendJournal journal, IResponder? responder = null, bool persistMessages = false)
+    /// <summary>
+    /// A logger that claims to be enabled and then throws from the scope the outgoing-message log
+    /// block opens. That block sits between Prepare and the responder's own try, so it is the
+    /// window in which an escape used to leave a prepared row with no outcome at all.
+    /// </summary>
+    private sealed class ThrowingSessionLoggerFactory : IQuickFixLoggerFactory
+    {
+        private sealed class ThrowingLogger : ILogger
+        {
+            public IDisposable? BeginScope<TState>(TState state)
+                where TState : notnull =>
+                throw new InvalidOperationException("log scope failed");
+
+            public bool IsEnabled(LogLevel logLevel) => true;
+
+            public void Log<TState>(
+                LogLevel logLevel, EventId eventId, TState state, Exception? exception,
+                Func<TState, Exception?, string> formatter)
+            { }
+        }
+
+        public ILogger CreateSessionLogger(SessionID sessionId) => new ThrowingLogger();
+
+        public ILogger CreateNonSessionLogger<T>() => new ThrowingLogger();
+    }
+
+    private static Session BuildSession(IOutboundSendJournal journal, IResponder? responder = null, bool persistMessages = false, IQuickFixLoggerFactory? loggerFactory = null)
     {
         var sessionId = new SessionID("FIX.4.2", "SENDER", "TARGET");
         var settings = new SettingsDictionary();
@@ -118,7 +145,7 @@ public class OutboundSendJournalTest
         var session = new Session(
             false, new SessionTestSupport.MockApplication(), new MemoryStoreFactory(), sessionId,
             new DataDictionaryProvider(), new SessionSchedule(settings), 0,
-            new LogFactoryAdapter(new NullLogFactory()), new DefaultMessageFactory(), "blah",
+            loggerFactory ?? new LogFactoryAdapter(new NullLogFactory()), new DefaultMessageFactory(), "blah",
             outboundSendJournal: journal);
         if (responder is not null)
             session.SetResponder(responder);
@@ -152,6 +179,30 @@ public class OutboundSendJournalTest
         logon.Header.SetField(new SendingTime(DateTime.UtcNow));
         logon.SetField(new HeartBtInt(1));
         session.Next(logon.ConstructString());
+    }
+
+    /// <summary>
+    /// Prepare has already consumed a MsgSeqNum and written a prepared row by the time the
+    /// outgoing-message log block runs, so an escape from that block must still record an outcome.
+    /// Recording nothing stalls the session's publishable prefix until the 60s sweep and loses the
+    /// frame's audit row, because the journal holds the only copy of the body for the capture seam.
+    /// Unknown, not NotTransmitted: the responder was never reached, so "the bytes never left" is
+    /// not a claim this path is entitled to make.
+    /// </summary>
+    [Test]
+    public void Escape_before_the_send_records_an_unknown_outcome()
+    {
+        var journal = new RecordingJournal();
+        var responder = new CountingResponder();
+        using var session = BuildSession(journal, responder, loggerFactory: new ThrowingSessionLoggerFactory());
+
+        Assert.That(() => session.Send(RawHeartbeat), Throws.InvalidOperationException);
+        Assert.Multiple(() =>
+        {
+            Assert.That(journal.Calls, Is.EqualTo(new[] { "prepare", "outcome:Unknown" }));
+            Assert.That(responder.SendCount, Is.Zero);
+            Assert.That(journal.OutcomeTokens, Is.EqualTo(journal.PreparedTokens));
+        });
     }
 
     [Test]
