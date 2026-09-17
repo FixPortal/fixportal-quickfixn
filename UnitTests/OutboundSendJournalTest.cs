@@ -186,11 +186,15 @@ public class OutboundSendJournalTest
     /// outgoing-message log block runs, so an escape from that block must still record an outcome.
     /// Recording nothing stalls the session's publishable prefix until the 60s sweep and loses the
     /// frame's audit row, because the journal holds the only copy of the body for the capture seam.
-    /// Unknown, not NotTransmitted: the responder was never reached, so "the bytes never left" is
-    /// not a claim this path is entitled to make.
+    ///
+    /// NotTransmitted, not Unknown. The log block sits before the responder call, which is the only
+    /// route to the transport, so an escape there PROVES the bytes never left — the assertion below
+    /// that the responder was never entered is the same fact the disposition records. Unknown would
+    /// be both false and harmful: it maps to a SendThrew recovery reason for a send that never ran,
+    /// and it withholds the one claim that licenses resending a frame whose MsgSeqNum is spent.
     /// </summary>
     [Test]
-    public void Escape_before_the_send_records_an_unknown_outcome()
+    public void Escape_before_the_send_records_an_unsent_outcome()
     {
         var journal = new RecordingJournal();
         var responder = new CountingResponder();
@@ -199,9 +203,29 @@ public class OutboundSendJournalTest
         Assert.That(() => session.Send(RawHeartbeat), Throws.InvalidOperationException);
         Assert.Multiple(() =>
         {
-            Assert.That(journal.Calls, Is.EqualTo(new[] { "prepare", "outcome:Unknown" }));
+            Assert.That(journal.Calls, Is.EqualTo(new[] { "prepare", "outcome:False" }));
             Assert.That(responder.SendCount, Is.Zero);
             Assert.That(journal.OutcomeTokens, Is.EqualTo(journal.PreparedTokens));
+        });
+    }
+
+    /// <summary>
+    /// The counterpart to the test above, pinning the boundary between the two dispositions. Once
+    /// the responder has been entered the bytes may or may not have reached the counterparty, so
+    /// the escape value becomes Unknown — and stays Unknown for anything added after the send.
+    /// </summary>
+    [Test]
+    public void Escape_after_the_send_records_an_unknown_outcome()
+    {
+        var journal = new RecordingJournal();
+        var responder = new CountingResponder(throwOnSend: true);
+        using var session = BuildSession(journal, responder);
+
+        Assert.That(() => session.Send(RawHeartbeat), Throws.InvalidOperationException);
+        Assert.Multiple(() =>
+        {
+            Assert.That(journal.Calls, Is.EqualTo(new[] { "prepare", "outcome:Unknown" }));
+            Assert.That(responder.SendCount, Is.EqualTo(1));
         });
     }
 
