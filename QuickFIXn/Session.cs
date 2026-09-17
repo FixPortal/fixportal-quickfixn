@@ -421,48 +421,72 @@ public class Session : IDisposable
         lock (_sync)
         {
             OutboundSendJournalToken? token = _outboundSendJournal?.Prepare(SessionID, message);
-            // A-F5 / M1: tap fires for every generated outbound frame, including phantom sends
-            // (when _responder is null or Send returns false). The transmitted flag tells the
-            // engine adapter whether the frame reached the wire, so it can mark the capture row
-            // accordingly rather than relying solely on the reconciliation arm.
-            if (_responder is null)
-            {
-                RecordJournalOutcome(token, transmitted: false);
-                TapOutbound(message, transmitted: false);
-                return false;
-            }
-
-            if (Log.IsEnabled(MessagesLogLevel))
-            {
-                using (Log.BeginScope(new Dictionary<string, object>
-                       {
-                           { "MessageType", Message.GetMsgType(message) }
-                       }))
-                {
-                    Log.Log(MessagesLogLevel, LogEventIds.OutgoingMessage, "{Message}",
-                        LogAssist.RedactSensitiveFields(message, RedactFieldsInLogs, RedactionLogText));
-                }
-            }
-
-            bool transmitted;
+            // FP Enhancement: 2026-09-17 — every path out of this method, exception included, must
+            // reach exactly one RecordJournalOutcome. Prepare has already consumed a MsgSeqNum and
+            // written a prepared row, so an escape that records nothing stalls this session's
+            // publishable prefix until the 60s sweep AND loses the frame's audit row, because the
+            // journal holds the only copy of the body for the capture seam. The window this closes
+            // is the message-log block below: Message.GetMsgType, LogAssist.RedactSensitiveFields
+            // and the logger provider itself all sit between Prepare and the send's own try.
+            bool outcomeRecorded = false;
             try
             {
-                transmitted = _responder.Send(message);
-            }
-            catch
-            {
-                // FP Enhancement: 2026-09-14 — the send threw, so we cannot say whether bytes
-                // reached the counterparty. Previously nothing was recorded at all and the
-                // prepared row stayed unresolved, stalling the journal's publishable prefix
-                // for this session. Record the uncertainty, then let the exception continue to
-                // the caller unchanged.
-                RecordJournalOutcome(token, OutboundSendDisposition.Unknown);
-                throw;
-            }
+                // A-F5 / M1: tap fires for every generated outbound frame, including phantom sends
+                // (when _responder is null or Send returns false). The transmitted flag tells the
+                // engine adapter whether the frame reached the wire, so it can mark the capture row
+                // accordingly rather than relying solely on the reconciliation arm.
+                if (_responder is null)
+                {
+                    outcomeRecorded = true;
+                    RecordJournalOutcome(token, transmitted: false);
+                    TapOutbound(message, transmitted: false);
+                    return false;
+                }
 
-            RecordJournalOutcome(token, transmitted);
-            TapOutbound(message, transmitted);
-            return transmitted;
+                if (Log.IsEnabled(MessagesLogLevel))
+                {
+                    using (Log.BeginScope(new Dictionary<string, object>
+                           {
+                               { "MessageType", Message.GetMsgType(message) }
+                           }))
+                    {
+                        Log.Log(MessagesLogLevel, LogEventIds.OutgoingMessage, "{Message}",
+                            LogAssist.RedactSensitiveFields(message, RedactFieldsInLogs, RedactionLogText));
+                    }
+                }
+
+                bool transmitted;
+                try
+                {
+                    transmitted = _responder.Send(message);
+                }
+                catch
+                {
+                    // FP Enhancement: 2026-09-14 — the send threw, so we cannot say whether bytes
+                    // reached the counterparty. Previously nothing was recorded at all and the
+                    // prepared row stayed unresolved, stalling the journal's publishable prefix
+                    // for this session. Record the uncertainty, then let the exception continue to
+                    // the caller unchanged.
+                    outcomeRecorded = true;
+                    RecordJournalOutcome(token, OutboundSendDisposition.Unknown);
+                    throw;
+                }
+
+                // Set before the call, not after: a throw from RecordJournalOutcome itself must not
+                // send the finally block down the same path a second time. RecordJournalOutcome
+                // already suppresses its own failures, so this is belt and braces.
+                outcomeRecorded = true;
+                RecordJournalOutcome(token, transmitted);
+                TapOutbound(message, transmitted);
+                return transmitted;
+            }
+            finally
+            {
+                if (!outcomeRecorded)
+                {
+                    RecordJournalOutcome(token, OutboundSendDisposition.Unknown);
+                }
+            }
         }
     }
 
