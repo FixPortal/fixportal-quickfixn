@@ -429,6 +429,13 @@ public class Session : IDisposable
             // is the message-log block below: Message.GetMsgType, LogAssist.RedactSensitiveFields
             // and the logger provider itself all sit between Prepare and the send's own try.
             bool outcomeRecorded = false;
+            // What an escape means depends on how far we got. Everything between Prepare and the
+            // responder call is BEFORE the only route to the transport, so an escape there proves
+            // the bytes never left — that is NotTransmitted, the claim that licenses a resend of a
+            // frame whose MsgSeqNum is already spent. Unknown is for after the responder has been
+            // entered and can no longer be ruled out, and it is deliberately the default from that
+            // point on so any code added after the send inherits the cautious value.
+            var escapeDisposition = OutboundSendDisposition.NotTransmitted;
             try
             {
                 // A-F5 / M1: tap fires for every generated outbound frame, including phantom sends
@@ -437,8 +444,8 @@ public class Session : IDisposable
                 // accordingly rather than relying solely on the reconciliation arm.
                 if (_responder is null)
                 {
-                    outcomeRecorded = true;
                     RecordJournalOutcome(token, transmitted: false);
+                    outcomeRecorded = true;
                     TapOutbound(message, transmitted: false);
                     return false;
                 }
@@ -456,6 +463,7 @@ public class Session : IDisposable
                 }
 
                 bool transmitted;
+                escapeDisposition = OutboundSendDisposition.Unknown;
                 try
                 {
                     transmitted = _responder.Send(message);
@@ -467,16 +475,18 @@ public class Session : IDisposable
                     // prepared row stayed unresolved, stalling the journal's publishable prefix
                     // for this session. Record the uncertainty, then let the exception continue to
                     // the caller unchanged.
-                    outcomeRecorded = true;
                     RecordJournalOutcome(token, OutboundSendDisposition.Unknown);
+                    outcomeRecorded = true;
                     throw;
                 }
 
-                // Set before the call, not after: a throw from RecordJournalOutcome itself must not
-                // send the finally block down the same path a second time. RecordJournalOutcome
-                // already suppresses its own failures, so this is belt and braces.
-                outcomeRecorded = true;
+                // Flag set AFTER the call, so a throw from RecordJournalOutcome still reaches the
+                // finally. The repeat is harmless: the emission store re-reads the row and returns
+                // early once it is no longer prepared, and the journal's pending slot is already
+                // removed, so nothing is written or captured twice. Setting it first would trade
+                // that harmless repeat for the very stall this block exists to prevent.
                 RecordJournalOutcome(token, transmitted);
+                outcomeRecorded = true;
                 TapOutbound(message, transmitted);
                 return transmitted;
             }
@@ -484,7 +494,7 @@ public class Session : IDisposable
             {
                 if (!outcomeRecorded)
                 {
-                    RecordJournalOutcome(token, OutboundSendDisposition.Unknown);
+                    RecordJournalOutcome(token, escapeDisposition);
                 }
             }
         }
