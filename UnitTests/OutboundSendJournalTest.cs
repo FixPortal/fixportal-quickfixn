@@ -133,7 +133,20 @@ public class OutboundSendJournalTest
         public ILogger CreateNonSessionLogger<T>() => new ThrowingLogger();
     }
 
-    private static Session BuildSession(IOutboundSendJournal journal, IResponder? responder = null, bool persistMessages = false, IQuickFixLoggerFactory? loggerFactory = null)
+    /// <summary>Records what the wire tap was told about outbound frames.</summary>
+    private sealed class RecordingWireTap : IFixWireTap
+    {
+        public List<(string RawFrame, bool Transmitted)> Outbound { get; } = [];
+
+        public void OnInbound(SessionID sessionId, string rawFrame) { }
+
+        public void OnInboundQueued(SessionID sessionId, SeqNumType seqNum) { }
+
+        public void OnOutbound(SessionID sessionId, string rawFrame, bool transmitted) =>
+            Outbound.Add((rawFrame, transmitted));
+    }
+
+    private static Session BuildSession(IOutboundSendJournal journal, IResponder? responder = null, bool persistMessages = false, IQuickFixLoggerFactory? loggerFactory = null, IFixWireTap? wireTap = null)
     {
         var sessionId = new SessionID("FIX.4.2", "SENDER", "TARGET");
         var settings = new SettingsDictionary();
@@ -146,6 +159,7 @@ public class OutboundSendJournalTest
             false, new SessionTestSupport.MockApplication(), new MemoryStoreFactory(), sessionId,
             new DataDictionaryProvider(), new SessionSchedule(settings), 0,
             loggerFactory ?? new LogFactoryAdapter(new NullLogFactory()), new DefaultMessageFactory(), "blah",
+            wireTap: wireTap,
             outboundSendJournal: journal);
         if (responder is not null)
             session.SetResponder(responder);
@@ -207,6 +221,26 @@ public class OutboundSendJournalTest
             Assert.That(responder.SendCount, Is.Zero);
             Assert.That(journal.OutcomeTokens, Is.EqualTo(journal.PreparedTokens));
         });
+    }
+
+    /// <summary>
+    /// The escape must tap as well as record. The engine's journal captures the frame only for an
+    /// Unknown outcome, on the reasoning that a definite outcome means QuickFIX/n already reached
+    /// its own wire tap — which is true everywhere except this path, because the escape jumps over
+    /// the tap call. Recording a definite outcome without tapping also finalises the emission row
+    /// and so puts it beyond the recovery sweep's capture, leaving the frame with no audit row at
+    /// all: the exact loss this whole block exists to prevent.
+    /// </summary>
+    [Test]
+    public void Escape_before_the_send_still_taps_the_frame()
+    {
+        var journal = new RecordingJournal();
+        var tap = new RecordingWireTap();
+        using var session = BuildSession(
+            journal, new CountingResponder(), loggerFactory: new ThrowingSessionLoggerFactory(), wireTap: tap);
+
+        Assert.That(() => session.Send(RawHeartbeat), Throws.InvalidOperationException);
+        Assert.That(tap.Outbound, Is.EqualTo(new[] { (RawHeartbeat, false) }));
     }
 
     /// <summary>
