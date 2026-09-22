@@ -140,5 +140,12 @@ jobs:
       # on. Adding setup-python here shadows the interpreter that works. (Its sibling
       # assert_gate_coverage.py no longer needs PyYAML at all -- it parses with the
       # stdlib -- so this step is the only PyYAML consumer left in this repo.)
+      # PRIVILEGED_TRIGGER_NO_CHECKOUT names workflows exempt from the target-context
+      # trigger refusal because they never check out head code — enforced, not merely
+      # granted: the checker fails any exempted workflow that also uses actions/checkout.
+      # review-tier.yml only reads the PR via the API against the base ref and writes a
+      # label; it never checks out PR content.
       - name: Workflows must be hygienic (no target-context trigger, no write-all, actions pinned)
+        env:
+          PRIVILEGED_TRIGGER_NO_CHECKOUT: review-tier.yml
         run: python3 .github/scripts/assert_workflow_hygiene.py
