@@ -1,0 +1,35 @@
+{
+  "schema": 1,
+  "canonical": {
+    "repository": "FixPortal/fixportal-agents-skills",
+    "commit": "e0f05d4a23278d93f70cdbb894d20857b6448922",
+    "syncedAt": "2026-09-24"
+  },
+  "assets": [
+    {
+      "path": ".github/scripts/assert_gate_coverage.py",
+      "sha256": "416700b82c0af6edf42002d53f8ab9216c076814ce5ef2d331825e14b0de78e6",
+      "verbatim": true
+    },
+    {
+      "path": ".github/scripts/assert_workflow_hygiene.py",
+      "sha256": "0739463ff00ef0e86221136c9061e80ab81f87aa0e5e18707da0f56c14a68ca1",
+      "verbatim": true
+    },
+    {
+      "path": ".github/workflows/review-policy-guard.yml",
+      "sha256": "f571d57b56de1d62e210c0a1e613bc58455de1c675bdfcef86e3ac0d045cdebe",
+      "verbatim": false
+    },
+    {
+      "path": ".github/workflows/review-tier.yml",
+      "sha256": "a1d0b6e5ec8c85e2736cc425af77180cb5e61f99b645abd7b2a1f54274663a21",
+      "verbatim": false
+    },
+    {
+      "path": "scripts/summarize-stryker.ps1",
+      "sha256": "f8e5604562f101b863db00607db8663fd8cfdb0652b0bbffbe73393df6cdf592",
+      "verbatim": true
+    }
+  ]
+}
