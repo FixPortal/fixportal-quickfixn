@@ -45,6 +45,7 @@
     ".github/scripts/assert_workflow_hygiene.py",
     ".github/workflows/fixportal-ci.yml",
     ".github/scripts/assert_gate_coverage.py",
+    ".github/scripts/assert_publish_gate.py",
     ".claude/review-policy.json",
     ".coderabbit.yaml",
     "nuget.config",

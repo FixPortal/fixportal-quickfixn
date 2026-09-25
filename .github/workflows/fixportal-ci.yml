@@ -120,6 +120,12 @@ jobs:
           GATE_EXEMPT: publish
         run: python3 .github/scripts/assert_gate_coverage.py .github/workflows/fixportal-ci.yml
 
+      - name: Assert publish job event/ref condition and prerequisites
+        # publish is exempted above from the generic merge-blocking check, so its own
+        # event/ref restriction and build+acceptance prerequisites are asserted here
+        # instead (G4, 2026-09-25 test audit).
+        run: python3 .github/scripts/assert_publish_gate.py .github/workflows/fixportal-ci.yml
+
   # Required status check. Deliberately a pure aggregator of needs.*.result: it decides
   # what can merge, so it has no checkout, no parser and no network of its own.
   #
