@@ -63,8 +63,14 @@ internal static class StreamFactory
         bool success = statusLineParts.Length >= 2 && statusLineParts[1] == "200";
 
         if (!success)
+        {
+            // Pre-existing leak, widened by this change: this path is now reached by more
+            // failure responses (any non-"200" status line), so the socket must be closed
+            // here rather than left for the caller, which never gets a reference to it.
+            socketThruProxy.Dispose();
             throw new ApplicationException(
                 $"Connection failed to {destUriWithPort} through proxy server {proxyUri}.");
+        }
 
         return socketThruProxy;
     }

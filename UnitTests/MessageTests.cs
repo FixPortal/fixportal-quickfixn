@@ -391,6 +391,31 @@ public class MessageTests
     }
 
     [Test]
+    public void ExtractDataFieldRejectsLengthThatSplitsAMultibyteCharacter() {
+        // A dataLength that lands mid-character (here: one byte short of "中"'s 3-byte UTF-8
+        // encoding) must fail loudly. The default (replacement-character) decoder fallback
+        // would instead silently substitute U+FFFD, which does not round-trip to the same
+        // byte count it replaced -- desynchronising `pos` from the wire and corrupting
+        // parsing of every field after this one, with no error raised anywhere.
+        CharEncoding.SetEncoding("utf-8");
+        try
+        {
+            const string payload = "中";
+            int fullByteLength = Encoding.UTF8.GetByteCount(payload);
+            int truncatedLength = fullByteLength - 1;
+
+            string msgstr = $"212={truncatedLength}\u0001213={payload}\u000158=followingfield\u0001";
+            int pos = msgstr.IndexOf("213=", StringComparison.Ordinal);
+
+            Assert.Throws<MessageParseError>(() => Message.ExtractDataField(msgstr, truncatedLength, ref pos));
+        }
+        finally
+        {
+            CharEncoding.ResetToDefaultEncoding();
+        }
+    }
+
+    [Test]
     public void XmlDataWithoutLengthTest() {
         QuickFix.DataDictionary.DataDictionary dd = new QuickFix.DataDictionary.DataDictionary();
         dd.LoadFIXSpec("FIX42");
