@@ -50,17 +50,37 @@ internal static class StreamFactory
 
         string proxyMsg = $"CONNECT {destHostName}:{destPort} HTTP/1.1\nHost: {destHostName}:{destPort}\n\n";
         byte[] buffer = Encoding.ASCII.GetBytes(proxyMsg);
-        byte[] buffer12 = new byte[500];
         socketThruProxy.Send(buffer, buffer.Length, 0);
-        socketThruProxy.Receive(buffer12, 500, 0);
-        string data = Encoding.ASCII.GetString(buffer12);
+
+        // A single Socket.Receive can return fewer bytes than the response actually contains
+        // (TCP is a byte stream, not message-based) -- a status line split across two reads would
+        // otherwise be misread as a truncated/failing one. Read until the header terminator
+        // (\r\n\r\n) is seen, or the buffer fills, and parse only the bytes actually received
+        // (a fixed-size buffer left zero-padded by a short read must not leak into the parse).
+        byte[] responseBuffer = new byte[4096];
+        int totalRead = 0;
+        while (totalRead < responseBuffer.Length)
+        {
+            int read = socketThruProxy.Receive(responseBuffer, totalRead, responseBuffer.Length - totalRead, SocketFlags.None);
+            if (read == 0)
+                break;
+            totalRead += read;
+            if (Encoding.ASCII.GetString(responseBuffer, 0, totalRead).Contains("\r\n\r\n", StringComparison.Ordinal))
+                break;
+        }
+        string data = Encoding.ASCII.GetString(responseBuffer, 0, totalRead);
 
         // Only the HTTP status line's status code decides success. A whole-response substring
         // search for "200" would also match "200" appearing anywhere in a non-success response's
-        // body (e.g. an error message that happens to mention an unrelated code).
+        // body (e.g. an error message that happens to mention an unrelated code). Any 2xx status
+        // is a successful CONNECT per RFC 9110 -- some proxies use 201/204, not only 200.
         string statusLine = data.Split(["\r\n", "\n"], StringSplitOptions.None)[0];
         string[] statusLineParts = statusLine.Split(' ', StringSplitOptions.RemoveEmptyEntries);
-        bool success = statusLineParts.Length >= 2 && statusLineParts[1] == "200";
+        bool success = statusLineParts.Length >= 2
+            && statusLineParts[1].Length == 3
+            && statusLineParts[1][0] == '2'
+            && char.IsDigit(statusLineParts[1][1])
+            && char.IsDigit(statusLineParts[1][2]);
 
         if (!success)
         {
