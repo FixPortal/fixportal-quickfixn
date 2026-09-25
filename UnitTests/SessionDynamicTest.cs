@@ -574,6 +574,30 @@ public class SessionDynamicTest
     }
 
     [Test]
+    public void InitiatorRetriesAndConnectsOnceEndpointBecomesAvailable()
+    {
+        // The counterparty listener is deliberately NOT started yet, so the initiator's
+        // very first connection attempt (fired immediately on Start()) fails with the
+        // endpoint unreachable. Use a short reconnect interval so the periodic retry
+        // loop (SocketInitiator.OnStart, QuickFIXn/Transport/SocketInitiator.cs:297)
+        // gets another attempt in quickly once the endpoint appears.
+        StartEngine(true, reconnectInterval: 1);
+        if (_initiator is null)
+            throw new AssertionException("_initiator is null");
+
+        // Give the first, doomed-to-fail attempt time to actually fail closed before the
+        // endpoint appears, so a later success can only be explained by a retried attempt.
+        Thread.Sleep(300);
+        Assert.That(HasReceivedMessage(StaticInitiatorCompId), Is.False,
+            "Initiator connected before its endpoint was made available");
+
+        StartListener();
+
+        Assert.That(WaitForLogonMessage(StaticInitiatorCompId), Is.True,
+            "Initiator never retried the connection after the endpoint became available");
+    }
+
+    [Test]
     public void DynamicInitiatorConnectsWithoutWaitingForReconnectInterval()
     {
         StartListener();
