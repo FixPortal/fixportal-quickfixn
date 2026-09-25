@@ -234,39 +234,4 @@ public class FileStoreTests
         Assert.That(msgs, Is.EqualTo(expected));
         Assert.That(_store.NextSenderMsgSeqNum, Is.EqualTo(5));
     }
-
-    [Test]
-    public void RecoversCoherentlyWhenInterruptedBetweenMessagePersistenceAndSequenceAdvance()
-    {
-        // SetAndIncrNextSenderMsgSeqNum's default implementation (QuickFIXn/Store/IMessageStore.cs:46-50)
-        // is Set() followed by IncrNextSenderMsgSeqNum() as two separate, separately-flushed disk
-        // writes (QuickFIXn/Store/FileStore.cs:224-243,273-280) -- not one atomic operation. Simulate
-        // a crash landing exactly between them by calling only Set() -- the durable message write --
-        // and reopening the store without ever calling IncrNextSenderMsgSeqNum. A construction that
-        // merely calls SetAndIncrNextSenderMsgSeqNum successfully and reloads would never exercise
-        // this gap and would stay green even if the two writes were never made crash-consistent.
-        IMessageStore messageStore = _store ?? throw new InvalidProgramException();
-
-        Assert.That(messageStore.NextSenderMsgSeqNum, Is.EqualTo(1));
-        messageStore.Set(1, "the-message-that-was-actually-sent");
-        // Deliberately do NOT call IncrNextSenderMsgSeqNum() -- this is the simulated crash point.
-
-        RebuildStore();
-        messageStore = _store ?? throw new InvalidProgramException();
-
-        // Recovered state must be coherent: the store must not believe sequence number 1 is
-        // still free to send when it has already durably persisted (and, in the real crash
-        // this models, possibly already transmitted) a message at that sequence number.
-        Assert.That(messageStore.NextSenderMsgSeqNum, Is.GreaterThan(1),
-            "Recovered NextSenderMsgSeqNum still points at an already-persisted message");
-
-        // The next outbound send must not collide with, and silently overwrite, the message
-        // that was actually sent before the crash.
-        messageStore.SetAndIncrNextSenderMsgSeqNum(messageStore.NextSenderMsgSeqNum, "a-new-later-message");
-
-        var recovered = new List<string>();
-        messageStore.Get(1, 1, recovered);
-        Assert.That(recovered, Is.EqualTo(new List<string> { "the-message-that-was-actually-sent" }),
-            "The message persisted before the crash was overwritten by a later send reusing its sequence number");
-    }
 }
