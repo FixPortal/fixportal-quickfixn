@@ -77,6 +77,32 @@ public class StreamFactoryProxyConnectTest
     }
 
     [Test]
+    public async Task Non200SuccessStatusEstablishesTunnel()
+    {
+        // RFC 9110: any 2xx response to CONNECT is a successful tunnel establishment, not
+        // only 200. Some proxies legitimately answer 201/204.
+        var (listener, port) = StartLocalProxy();
+        WebRequest.DefaultWebProxy = new WebProxy($"http://127.0.0.1:{port}");
+        try
+        {
+            Task proxyTask = RespondOnceAsync(listener, "HTTP/1.1 204 No Content\r\n\r\n");
+
+            using var stream = StreamFactory.CreateClientStream(
+                new IPEndPoint(IPAddress.Loopback, 65000),
+                ProxiedSettings(),
+                NullQuickFixLoggerFactory.Instance,
+                CancellationToken.None);
+
+            Assert.That(stream, Is.Not.Null);
+            await proxyTask;
+        }
+        finally
+        {
+            listener.Stop();
+        }
+    }
+
+    [Test]
     public async Task NonSuccessStatusIsRejected()
     {
         var (listener, port) = StartLocalProxy();
