@@ -91,8 +91,8 @@ public class DataDictionary_ValidateTests
         dd.LoadTestFIXSpec("group_begins_group");
 
         string msgStr = ("8=FIX.9.9|9=167|35=magic|34=3|49=CLIENT1|52=20111012-22:15:55.474|56=EXECUTOR|"
-                         + "1111=mundane|5555=magicfield|6660=1|7770=2|7711=Hoppy|7712=brown|"
-                         + "7711=Floppy|7712=white|6661=abracadabra|10=48|").Replace('|', Message.SOH);
+                         + "1111=mundane|5555=magicfield|6660=1|7770=2|7711=Hoppy|7712=brown|7713=2|"
+                         + "7711=Floppy|7712=white|7713=3|6661=abracadabra|10=48|").Replace('|', Message.SOH);
         string beginString = Message.ExtractBeginString(msgStr);
         Message msg = new Message(msgStr, dd, dd, false);
 
@@ -108,6 +108,25 @@ public class DataDictionary_ValidateTests
         Assert.That(magicGroup.GetString(6661), Is.EqualTo("abracadabra"));
         Assert.That(rabbitGroup.GetString(7711), Is.EqualTo("Floppy"));
         Assert.That(rabbitGroup.GetString(7712), Is.EqualTo("white"));
+    }
+
+    [Test]
+    public void ValidateGroupMissingRequiredMemberIsRejected()
+    {
+        DataDictionary dd = new DataDictionary();
+        dd.LoadTestFIXSpec("group_begins_group");
+
+        // RabbitAge (7713) is required="Y" in the NoRabbits group (spec/test/group_begins_group.xml)
+        // but is not the group's delimiter field (RabbitName, 7711). This entry sets the
+        // delimiter and the optional RabbitColor, but omits the required, non-delimiter RabbitAge.
+        string msgStr = ("8=FIX.9.9|9=167|35=magic|34=3|49=CLIENT1|52=20111012-22:15:55.474|56=EXECUTOR|"
+                         + "1111=mundane|6660=1|7770=1|7711=Hoppy|7712=brown|10=48|").Replace('|', Message.SOH);
+        string beginString = Message.ExtractBeginString(msgStr);
+        Message msg = new Message(msgStr, dd, dd, false);
+
+        var ex = Assert.Throws<RequiredTagMissing>(() =>
+            DataDictionary.Validate(msg, dd, dd, beginString, "magic"));
+        Assert.That(ex!.Field, Is.EqualTo(7713));
     }
 
     [Test]

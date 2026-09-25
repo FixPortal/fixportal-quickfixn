@@ -1,5 +1,6 @@
 ﻿using System;
 using System.Collections.Generic;
+using System.Text;
 using NUnit.Framework;
 using QuickFix;
 using QuickFix.Fields;
@@ -360,6 +361,33 @@ public class MessageTests
 
         //verify that the data field was read correctly
         Assert.That(n.Header.GetString(213).Length, Is.EqualTo(n.Header.GetInt(212)));
+    }
+
+    [Test]
+    public void ExtractDataFieldReadsMultibyteEncodedBytesNotChars() {
+        // The FIX-declared data length (212/XmlDataLen here) is a count of ENCODED
+        // BYTES. Under UTF-8, a multibyte character's byte count exceeds its .NET
+        // char count, so using char count instead of byte count either truncates the
+        // payload or eats into the following field.
+        CharEncoding.SetEncoding("utf-8");
+        try
+        {
+            const string payload = "café éèâ 中文"; // mixes 2- and 3-byte UTF-8 chars
+            int byteLength = Encoding.UTF8.GetByteCount(payload);
+
+            string msgstr = $"212={byteLength}\u0001213={payload}\u000158=followingfield\u0001";
+            int pos = msgstr.IndexOf("213=", StringComparison.Ordinal);
+
+            StringField field = Message.ExtractDataField(msgstr, byteLength, ref pos);
+
+            Assert.That(field.Tag, Is.EqualTo(213));
+            Assert.That(field.ToString(), Is.EqualTo(payload));
+            Assert.That(msgstr.Substring(pos), Does.StartWith("58=followingfield"));
+        }
+        finally
+        {
+            CharEncoding.ResetToDefaultEncoding();
+        }
     }
 
     [Test]

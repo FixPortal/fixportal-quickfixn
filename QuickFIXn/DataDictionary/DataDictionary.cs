@@ -169,12 +169,6 @@ public class DataDictionary
                     throw new RequiredTagMissing(field);
             }
         }
-
-        /* FIXME TODO group stuff
-        foreach (DDGroup grp in _messages[msgType].Groups.Values)
-          if (_messages[msgType].ReqFields.Contains(grp.Field))
-            ReqFieldsSetInGroups(grp, fields);
-        */
     }
 
     public void Iterate(FieldMap map, string msgType)
@@ -248,6 +242,12 @@ public class DataDictionary
     public void IterateGroup(Group group, DDGrp ddgroup, string msgType)
     {
         CheckHasNoRepeatedTags(group);
+
+        foreach (int field in ddgroup.ReqFields)
+        {
+            if (!group.IsSetField(field))
+                throw new RequiredTagMissing(field);
+        }
 
         int lastField = 0;
         foreach (KeyValuePair<int, IField> kvp in group)
