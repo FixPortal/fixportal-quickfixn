@@ -41,7 +41,13 @@ def extract_job_block(workflow_text: str, job_id: str) -> str:
 
 
 def extract_if_condition(job_block: str) -> str:
-    match = re.search(r"^\s*if:\s*(.+)$", job_block, re.MULTILINE)
+    # Anchored to exactly 4-space indent (job-level key, one level under "  <job-id>:"),
+    # not "^\s*if:" -- an unanchored match would also hit a STEP-level `if:` nested under
+    # `steps:` (6+ spaces), and take whichever if: comes first in the block regardless of
+    # which one actually gates the job. A future step-level `if:` added above the job-level
+    # one -- or a weakened/removed job-level one with a step-level `if:` left behind -- would
+    # then evaluate the wrong condition and could pass a job that isn't really gated.
+    match = re.search(r"^ {4}if:\s*(.+)$", job_block, re.MULTILINE)
     if match is None:
         raise AssertionError("job has no 'if:' condition -- publish is unconditional")
     return match.group(1).strip()

@@ -114,9 +114,19 @@ public class Message : FieldMap
             // Under a multibyte encoding (e.g. UTF-8) a char count can undershoot or
             // overshoot the real byte count, truncating the payload or eating into the
             // next field. Re-encode the remainder and slice by bytes, then decode back.
+            //
+            // A strict (throwing) decoder fallback is used deliberately: the default
+            // replacement-character fallback would silently substitute U+FFFD for a
+            // declared length that lands mid-character (invalid trailing bytes, or a
+            // dataLength that splits a multibyte sequence). U+FFFD does not round-trip
+            // to the same byte count it replaced, so `pos` would then desynchronise
+            // from the wire and the next tag would be parsed out of the middle of this
+            // field's payload -- corrupting parsing silently instead of failing loudly.
             Encoding encoding = CharEncoding.SelectedEncoding;
             byte[] remainingBytes = encoding.GetBytes(msgstr.Substring(pos));
-            string value = encoding.GetString(remainingBytes, 0, dataLength);
+            Encoding strictEncoding = (Encoding)encoding.Clone();
+            strictEncoding.DecoderFallback = DecoderFallback.ExceptionFallback;
+            string value = strictEncoding.GetString(remainingBytes, 0, dataLength);
             StringField field = new StringField(tag, value);
 
             pos += value.Length + 1;
@@ -125,6 +135,12 @@ public class Message : FieldMap
         catch (ArgumentOutOfRangeException e)
         {
             throw new MessageParseError($"Error at position ({pos}) while parsing msg ({msgstr})", e);
+        }
+        catch (DecoderFallbackException e)
+        {
+            throw new MessageParseError(
+                $"Declared data length ({dataLength}) does not align with a valid encoded character boundary at position ({pos}) while parsing msg ({msgstr})",
+                e);
         }
         catch (OverflowException e)
         {

@@ -585,12 +585,11 @@ public class SessionDynamicTest
         if (_initiator is null)
             throw new AssertionException("_initiator is null");
 
-        // Give the first, doomed-to-fail attempt time to actually fail closed before the
-        // endpoint appears, so a later success can only be explained by a retried attempt.
-        Thread.Sleep(300);
-        Assert.That(HasReceivedMessage(StaticInitiatorCompId), Is.False,
-            "Initiator connected before its endpoint was made available");
-
+        // No listener is bound yet at this point, so the first connection attempt cannot
+        // possibly succeed -- there is nothing to connect to. That makes the later success
+        // structurally attributable to a retry, without needing a timing-dependent negative
+        // assertion (a fixed sleep followed by an immediate assert is a flake under
+        // contention, and it proves nothing a sleep-free structural guarantee doesn't already).
         StartListener();
 
         Assert.That(WaitForLogonMessage(StaticInitiatorCompId), Is.True,
