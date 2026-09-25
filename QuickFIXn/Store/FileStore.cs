@@ -164,6 +164,27 @@ public class FileStore : IMessageStore
                 }
             }
         }
+
+        // Set() (message + header) and the sequence-number file are written and flushed
+        // separately, not as one atomic operation (see IMessageStore.SetAndIncrNextSenderMsgSeqNum).
+        // An interruption between the two can leave a message durably persisted at a sequence
+        // number the .seqnums file never advanced past. Left uncorrected, the next outbound
+        // message would reuse that sequence number and silently overwrite the already-persisted
+        // (and possibly already-transmitted) message in the header file, corrupting resend
+        // recovery. Reconcile on load: NextSenderMsgSeqNum must always be past every message
+        // this store actually has on disk.
+        if (_offsets.Count > 0)
+        {
+            SeqNumType highestPersistedSenderSeqNum = 0;
+            foreach (SeqNumType seqNum in _offsets.Keys)
+            {
+                if (seqNum > highestPersistedSenderSeqNum)
+                    highestPersistedSenderSeqNum = seqNum;
+            }
+
+            if (highestPersistedSenderSeqNum >= _cache.NextSenderMsgSeqNum)
+                _cache.NextSenderMsgSeqNum = highestPersistedSenderSeqNum + 1;
+        }
     }
 
     private void InitializeSessionCreateTime()
