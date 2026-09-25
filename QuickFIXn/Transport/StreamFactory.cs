@@ -54,9 +54,15 @@ internal static class StreamFactory
         socketThruProxy.Send(buffer, buffer.Length, 0);
         socketThruProxy.Receive(buffer12, 500, 0);
         string data = Encoding.ASCII.GetString(buffer12);
-        int index = data.IndexOf("200", StringComparison.Ordinal);
 
-        if (index < 0)
+        // Only the HTTP status line's status code decides success. A whole-response substring
+        // search for "200" would also match "200" appearing anywhere in a non-success response's
+        // body (e.g. an error message that happens to mention an unrelated code).
+        string statusLine = data.Split(["\r\n", "\n"], StringSplitOptions.None)[0];
+        string[] statusLineParts = statusLine.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+        bool success = statusLineParts.Length >= 2 && statusLineParts[1] == "200";
+
+        if (!success)
             throw new ApplicationException(
                 $"Connection failed to {destUriWithPort} through proxy server {proxyUri}.");
 

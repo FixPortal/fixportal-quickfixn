@@ -27,6 +27,7 @@
         <group name="NoRabbits">
           <field name="RabbitName" required="Y"/>
           <field name="RabbitColor" required="N"/>
+          <field name="RabbitAge" required="Y"/>
         </group>
         <field name="MagicWord" required="N"/>
       </group>
@@ -50,6 +51,7 @@
     <field number="7770" name="NoRabbits" type="NUMINGROUP"/>
     <field number="7711" name="RabbitName" type="STRING"/>
     <field number="7712" name="RabbitColor" type="STRING"/>
+    <field number="7713" name="RabbitAge" type="INT"/>
     <field number="6661" name="MagicWord" type="STRING"/>
   </fields>
 </fix>

@@ -109,9 +109,17 @@ public class Message : FieldMap
             int tagend = msgstr.IndexOf('=', pos);
             int tag = Convert.ToInt32(msgstr.Substring(pos, tagend - pos));
             pos = tagend + 1;
-            StringField field = new StringField(tag, msgstr.Substring(pos, dataLength));
 
-            pos += dataLength + 1;
+            // dataLength is a count of ENCODED BYTES per the FIX spec, not of .NET chars.
+            // Under a multibyte encoding (e.g. UTF-8) a char count can undershoot or
+            // overshoot the real byte count, truncating the payload or eating into the
+            // next field. Re-encode the remainder and slice by bytes, then decode back.
+            Encoding encoding = CharEncoding.SelectedEncoding;
+            byte[] remainingBytes = encoding.GetBytes(msgstr.Substring(pos));
+            string value = encoding.GetString(remainingBytes, 0, dataLength);
+            StringField field = new StringField(tag, value);
+
+            pos += value.Length + 1;
             return field;
         }
         catch (ArgumentOutOfRangeException e)
