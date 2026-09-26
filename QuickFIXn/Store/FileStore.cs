@@ -138,15 +138,24 @@ public class FileStore : IMessageStore
         _offsets.Clear();
         if (System.IO.File.Exists(_headerFileName))
         {
+            // FP Enhancement: 2026-09-26 — skip a header entry whose body bytes are not all on disk
+            // (a torn or truncated write). Get() would otherwise fail reading it and abandon the
+            // whole resend range; without the entry the resend gap-fills over that one number.
+            long bodyLength = System.IO.File.Exists(_msgFileName)
+                ? new System.IO.FileInfo(_msgFileName).Length
+                : 0;
             using (System.IO.StreamReader reader = new System.IO.StreamReader(_headerFileName))
             {
                 while (reader.ReadLine() is { } line)
                 {
                     string[] headerParts = line.Split(',');
-                    if (headerParts.Length == 3)
+                    if (headerParts.Length == 3
+                        && SeqNumType.TryParse(headerParts[0], out SeqNumType seqNum)
+                        && long.TryParse(headerParts[1], out long index)
+                        && int.TryParse(headerParts[2], out int size)
+                        && index >= 0 && size >= 0 && index + size <= bodyLength)
                     {
-                        _offsets[Convert.ToUInt64(headerParts[0])] = new MsgDef(
-                            Convert.ToInt64(headerParts[1]), Convert.ToInt32(headerParts[2]));
+                        _offsets[seqNum] = new MsgDef(index, size);
                     }
                 }
             }
@@ -223,23 +232,59 @@ public class FileStore : IMessageStore
     /// <returns></returns>
     public bool Set(SeqNumType msgSeqNum, string msg)
     {
-        _msgFile.Seek(0, System.IO.SeekOrigin.End);
+        // FP Enhancement: 2026-09-26 — body before header, so a header entry always names
+        // bytes that are already on disk. The upstream order (header first) left a header
+        // pointing at a torn or missing body after a crash between the two writes.
+        MsgDef def = AppendBody(msg);
+        AppendHeader(msgSeqNum, def);
+        return true;
+    }
 
+    /// <summary>
+    /// FP Enhancement: 2026-09-26 — the upstream default performs Set() then
+    /// IncrNextSenderMsgSeqNum(), separately flushed, so a crash between them left a message
+    /// recorded at a sequence number the .seqnums file never advanced past: the next send
+    /// reused that number and replaced the recorded message. Order the three durable writes so
+    /// every interruption point leaves a coherent store: body, then the advanced sequence
+    /// number, then the header entry that makes the message visible. Session.Persist runs
+    /// before the send, so a message the store never recorded was never transmitted either;
+    /// a crash after the sequence write leaves a gap that resend fills with a SequenceReset.
+    /// </summary>
+    public bool SetAndIncrNextSenderMsgSeqNum(SeqNumType msgSeqNum, string msg)
+    {
+        MsgDef def = AppendBody(msg);
+        IncrNextSenderMsgSeqNum();
+        AppendHeader(msgSeqNum, def);
+        return true;
+    }
+
+    /// <summary>
+    /// Test-only fault seam: invoked after each flushed write (body, header, sequence numbers).
+    /// Throwing from it models the process dying at that point.
+    /// </summary>
+    internal Action? AfterDurableWrite { get; set; }
+
+    private MsgDef AppendBody(string msg)
+    {
+        _msgFile.Seek(0, System.IO.SeekOrigin.End);
         long offset = _msgFile.Position;
 
         using ValueDisposable _ = CharEncoding.GetBytes(msg.AsSpan(), out ReadOnlySpan<byte> msgBytes);
-
-        using PooledStringBuilder pooledSb = new PooledStringBuilder();
-        StringBuilder b = pooledSb.Builder.Append(msgSeqNum).Append(',').Append(offset).Append(',').Append(msgBytes.Length);
-        _headerFile.WriteLine(b.ToString());
-        _headerFile.Flush();
-
-        _offsets[msgSeqNum] = new MsgDef(offset, msgBytes.Length);
-
         _msgFile.Write(msgBytes);
         _msgFile.Flush();
+        AfterDurableWrite?.Invoke();
 
-        return true;
+        return new MsgDef(offset, msgBytes.Length);
+    }
+
+    private void AppendHeader(SeqNumType msgSeqNum, MsgDef def)
+    {
+        using PooledStringBuilder pooledSb = new PooledStringBuilder();
+        StringBuilder b = pooledSb.Builder.Append(msgSeqNum).Append(',').Append(def.Index).Append(',').Append(def.Size);
+        _headerFile.WriteLine(b.ToString());
+        _headerFile.Flush();
+        _offsets[msgSeqNum] = def;
+        AfterDurableWrite?.Invoke();
     }
 
     public SeqNumType NextSenderMsgSeqNum {
@@ -277,6 +322,7 @@ public class FileStore : IMessageStore
         {
             writer.Write(NextSenderMsgSeqNum.ToString("D20") + " : " + NextTargetMsgSeqNum.ToString("D20") + "  ");
         }
+        AfterDurableWrite?.Invoke();
     }
 
     public DateTime? CreationTime => _cache.CreationTime;
