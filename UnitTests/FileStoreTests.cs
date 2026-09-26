@@ -234,4 +234,82 @@ public class FileStoreTests
         Assert.That(msgs, Is.EqualTo(expected));
         Assert.That(_store.NextSenderMsgSeqNum, Is.EqualTo(5));
     }
+
+    private sealed class SimulatedCrash : Exception;
+
+    /// <summary>
+    /// C1: SetAndIncrNextSenderMsgSeqNum makes three durable writes (body, sequence numbers,
+    /// header). Interrupt after each of the first two, reopen the files, and check the store
+    /// is coherent: no message is recorded at the number the next send will use (it would be
+    /// replaced), and every recorded message reads back intact.
+    /// </summary>
+    [TestCase(1)]
+    [TestCase(2)]
+    public void SetAndIncr_interrupted_between_durable_writes_recovers_a_coherent_store(int writesBeforeCrash)
+    {
+        IMessageStore store = _store!;
+        store.SetAndIncrNextSenderMsgSeqNum(1, "first");
+
+        int writes = 0;
+        _store!.AfterDurableWrite = () =>
+        {
+            if (++writes == writesBeforeCrash)
+                throw new SimulatedCrash();
+        };
+        Assert.Throws<SimulatedCrash>(() => store.SetAndIncrNextSenderMsgSeqNum(2, "second"));
+        _store.AfterDurableWrite = null;
+
+        RebuildStore();
+
+        SeqNumType next = _store.NextSenderMsgSeqNum;
+        var atNext = new List<string>();
+        _store.Get(next, next, atNext);
+        Assert.That(atNext, Is.Empty, $"a message is recorded at NextSenderMsgSeqNum {next}; the next send would replace it");
+
+        var recorded = new List<string>();
+        Assert.DoesNotThrow(() => _store.Get(1, next - 1, recorded));
+        Assert.That(recorded[0], Is.EqualTo("first"));
+        Assert.That(recorded, Is.SubsetOf(new[] { "first", "second" }));
+    }
+
+    /// <summary>
+    /// C1: a header entry whose body bytes never reached disk (a torn write) is dropped on
+    /// load, so a resend over that range reads the intact messages instead of failing.
+    /// </summary>
+    [Test]
+    public void Header_entry_past_the_end_of_the_body_is_ignored_on_load()
+    {
+        IMessageStore store = _store!;
+        store.SetAndIncrNextSenderMsgSeqNum(1, "first");
+        store.SetAndIncrNextSenderMsgSeqNum(2, "second");
+        _store!.Dispose();
+
+        string headerPath = Path.Combine(_storeDirectory, FileStore.Prefix(_sessionId) + ".header");
+        long bodyLength = new FileInfo(Path.Combine(_storeDirectory, FileStore.Prefix(_sessionId) + ".body")).Length;
+        File.AppendAllText(headerPath, $"3,{bodyLength},50{Environment.NewLine}");
+
+        _store = (FileStore)_factory!.Create(_sessionId);
+
+        var msgs = new List<string>();
+        Assert.DoesNotThrow(() => _store.Get(1, 3, msgs));
+        Assert.That(msgs, Is.EqualTo(new List<string> { "first", "second" }));
+    }
+
+    /// <summary>
+    /// C1: recovery must not second-guess the sequence file. An operator rewind of
+    /// NextSenderMsgSeqNum below messages already recorded survives a reopen.
+    /// </summary>
+    [Test]
+    public void Rewound_sender_sequence_survives_reopen()
+    {
+        IMessageStore store = _store!;
+        store.SetAndIncrNextSenderMsgSeqNum(1, "first");
+        store.SetAndIncrNextSenderMsgSeqNum(2, "second");
+        store.SetAndIncrNextSenderMsgSeqNum(3, "third");
+
+        store.NextSenderMsgSeqNum = 2;
+        RebuildStore();
+
+        Assert.That(_store!.NextSenderMsgSeqNum, Is.EqualTo(2));
+    }
 }
