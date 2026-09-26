@@ -32,12 +32,13 @@ name: Review policy guard
 # Do not restore `.github/workflows/**` or `.gitignore` to the policy's high list without
 # first removing the corresponding assertion here.
 
-# THIS REPO'S MAINLINE IS `fpsim`, NOT `main` - it is the FixPortal fork of QuickFIX/n.
-# The shipped asset filters on `main`, so before 2026-08-19 this guard never ran here at
-# all: no "Review policy intact" check existed on any PR, and the required-status rule had
-# nothing to wait for. Keep this branch list pointing at the real mainline, and re-apply it
-# whenever the asset is copied in again - scaffold-ci does not know about forks.
 # Deliberately narrow: pull_request already covers branch commits.
+#
+# `main` is the ONE permitted difference in the byte-comparison audit-ci runs over this
+# file. GitHub does not evaluate ${{ }} expressions inside an `on:` trigger block, so a
+# repo whose mainline is not `main` edits both branch names here and audit-ci normalises
+# that substitution against the repo's own primary-workflow push branch before comparing.
+# Change nothing else.
 on:
   push:
     branches: [fpsim]
@@ -102,22 +103,50 @@ jobs:
           # The review control plane must stay HIGH in every repo: this file decides which
           # reviewers a PR needs, and .coderabbit.yaml can silence a reviewer outright.
           #
-          # This guard and its checker are on the list for a reason found on 2026-08-22.
-          # The required "Review policy intact" context is produced by the PR's OWN copy of
-          # this workflow, so a PR that replaces the assertion steps with `run: true` reports
-          # the context green while asserting nothing. The header comment's self-protection
-          # argument only ever covered DELETION -- a deleted workflow never reports, so the
-          # context stays pending and blocks -- and said nothing about neutering.
-          # fixportal-ci.yml and assert_gate_coverage.py are on the list for the same reason
-          # (adversarial finding R1, 2026-08-23): the required "CI Gate" context is produced by
-          # the PR's OWN copy of fixportal-ci.yml, so a PR that neuters ci-gate's if:, drops
-          # gate-coverage from needs:, or no-ops the checker still reports green. The guard
-          # protects its sibling or the sibling protects nothing.
+          # The MERGE BARRIER joined the list on 2026-08-23, after an adversarial-review
+          # sweep found the same hole in six estate repos at once. "CI Gate" is a required
+          # status check produced by the PR's OWN copy of ci.yml: a PR that keeps the job,
+          # its name and its needs: list, and only guts the aggregation step, reports green
+          # while gating nothing. The checker that asserts the wiring, and this workflow
+          # which asserts the policy, neuter the same way. All were tiering NORMAL.
+          #
+          # This is a NAMED-PATH list, not the '.github/workflows/**' glob that left the
+          # policy on 2026-08-19 — the objection to the glob was its cost across routine
+          # workflow edits, and these files change a few times a year. Deliberately no
+          # count here: the list started at three and the hygiene checker took it to six,
+          # so a number goes stale and misleads whoever next adjusts it. Adjust the
+          # ci.yml path if this repo's main workflow is named differently.
+          #
+          # review-tier.yml joined on 2026-09-22. It is the SERVER-SIDE tier enforcer:
+          # it reads this policy at the base sha and applies the review-high label that
+          # CodeRabbit triggers on. Until then it was tiered by no rule of its own, so an
+          # edit weakening the thing that enforces the tiers got the lighter review —
+          # the control plane's own enforcer sitting outside the control plane. Named
+          # path, same as the rest: it changes a few times a year.
           for required in .claude/review-policy.json .coderabbit.yaml \
-            .github/workflows/review-policy-guard.yml .github/scripts/assert_workflow_hygiene.py \
-            .github/workflows/fixportal-ci.yml .github/scripts/assert_gate_coverage.py; do
+            .github/workflows/fixportal-ci.yml .github/workflows/review-policy-guard.yml \
+            .github/workflows/review-tier.yml \
+            .github/scripts/assert_gate_coverage.py \
+            .github/scripts/assert_workflow_hygiene.py; do
+            if [ ! -f "$required" ]; then
+              echo "::error file=$required::Required review control-plane file is missing. Restore it and keep it HIGH-tiered."
+              exit 1
+            fi
             if ! jq -e --arg r "$required" '.high | index($r)' "$policy" >/dev/null; then
               echo "::error file=$policy::'$required' is missing from the high list. An edit to it would get the lighter review."
+              exit 1
+            fi
+          done
+
+          # Stack-specific supply-chain and analyzer files are optional across the estate,
+          # but if present they must receive HIGH review.
+          # assert_canonical_assets.py joined on 2026-09-26: gate coverage already refuses a
+          # gate-feeding script that is not HIGH, but the guard should hold that on its own.
+          for required in .claude/ci-budget-approval.json .github/canonical-assets.json \
+            .github/scripts/assert_canonical_assets.py \
+            nuget.config NuGet.config global.json .config/dotnet-tools.json .npmrc Directory.Build.props; do
+            if [ -f "$required" ] && ! jq -e --arg r "$required" '.high | index($r)' "$policy" >/dev/null; then
+              echo "::error file=$policy::'$required' exists but is missing from the high list. An edit to it would get the lighter review."
               exit 1
             fi
           done
@@ -125,26 +154,37 @@ jobs:
           echo "Review policy is tracked, unignored, parseable, and tiers its own control plane HIGH."
           jq -c '{version, high: (.high | length), low: (.low | length)}' "$policy"
 
-      # Structural parse, NOT a grep. The three line-anchored greps this replaces were
-      # bypassable by ORDINARY block-style YAML -- a value may sit on the line after its
-      # key -- so `permissions:` followed by an indented `write-all`, and a `uses:` split
-      # the same way, both passed the guard green while resolving to exactly what the
-      # single-line spelling resolves to. Observed 2026-08-22; the script header carries
-      # the evidence. Parsing also removes the self-match hazard that forced the old
-      # `^[^#]*` prefixes: a parser reads values, so a comment describing a rule -- such
-      # as this one -- cannot be mistaken for a violation of it.
+      # PARSED, NOT GREPPED — replaced the two grep steps that used to live here
+      # (2026-08-24). Those greps had to exclude comment lines, because the pattern for
+      # each rule matched the comment EXPLAINING that rule: the first version failed the
+      # guard in every repo it was installed into, caught on the fixportal-venue pilot.
+      # They were also both too loose (prose tripped them) and too tight (a quoted value,
+      # a list-form trigger `on: [push, pull_request_target]`, or a digest-pinned image
+      # read wrongly). A parser has neither problem, and the checker's own source sitting
+      # in the repo cannot trip it — pinned by a test.
+      #
       # Deliberately NO actions/setup-python step. That installs a clean interpreter from
-      # the tool cache, and PyYAML is not in it -- which failed this job on its first run
+      # the tool cache, and PyYAML is not in it — which failed this job on its first run
       # (2026-08-22, "PyYAML is not available to this runner"). The runner image's SYSTEM
-      # python3 does carry PyYAML, which is what assert_workflow_hygiene.py below relies
-      # on. Adding setup-python here shadows the interpreter that works. (Its sibling
-      # assert_gate_coverage.py no longer needs PyYAML at all -- it parses with the
-      # stdlib -- so this step is the only PyYAML consumer left in this repo.)
+      # python3 does carry PyYAML. Adding setup-python here shadows the interpreter that
+      # works.
+      #
+      # Optional stricter mode: set TRUSTED_THIRD_PARTY_ACTIONS to a space-separated list
+      # of owner/repo entries to additionally require every third-party action to be named
+      # there. Off unless set — see the script's header for why it is not a default.
+      #
       # PRIVILEGED_TRIGGER_NO_CHECKOUT names workflows exempt from the target-context
       # trigger refusal because they never check out head code — enforced, not merely
       # granted: the checker fails any exempted workflow that also uses actions/checkout.
       # review-tier.yml only reads the PR via the API against the base ref and writes a
       # label; it never checks out PR content.
+      #
+      # This reached the asset on 2026-09-22, AFTER all 32 consuming repositories already
+      # carried it. The review-tier rollout added the env block repo-locally in each one
+      # and never upstreamed it, so canonical sat behind every consumer and a fresh
+      # scaffold from it would have shipped a guard that fails hygiene on the very
+      # workflow the rollout installs. Exactly the drift shape the divergence gate exists
+      # to surface — in the direction the gate does not watch.
       - name: Workflows must be hygienic (no target-context trigger, no write-all, actions pinned)
         env:
           PRIVILEGED_TRIGGER_NO_CHECKOUT: review-tier.yml

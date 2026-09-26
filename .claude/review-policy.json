@@ -51,7 +51,10 @@
     "nuget.config",
     "spec/**",
     "DataDictionaries/**",
-    "DDTool/**"
+    "DDTool/**",
+    ".github/workflows/review-tier.yml",
+    ".github/canonical-assets.json",
+    ".config/dotnet-tools.json"
   ],
 
   "low": [
