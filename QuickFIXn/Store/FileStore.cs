@@ -120,6 +120,10 @@ public class FileStore : IMessageStore
 
     private static void TruncateTo(string path, long length)
     {
+        // Missing after a Reset() whose OpenHeader failed: nothing to cut, and OpenHeader recreates it.
+        if (!System.IO.File.Exists(path))
+            return;
+
         using System.IO.FileStream fs = new System.IO.FileStream(
             path, System.IO.FileMode.Open, System.IO.FileAccess.Write, System.IO.FileShare.Read);
         if (fs.Length > length)
