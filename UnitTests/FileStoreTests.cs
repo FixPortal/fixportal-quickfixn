@@ -284,8 +284,8 @@ public class FileStoreTests
         store.SetAndIncrNextSenderMsgSeqNum(2, "second");
         _store!.Dispose();
 
-        string headerPath = Path.Combine(_storeDirectory, FileStore.Prefix(_sessionId) + ".header");
-        long bodyLength = new FileInfo(Path.Combine(_storeDirectory, FileStore.Prefix(_sessionId) + ".body")).Length;
+        string headerPath = Path.Join(_storeDirectory, FileStore.Prefix(_sessionId) + ".header");
+        long bodyLength = new FileInfo(Path.Join(_storeDirectory, FileStore.Prefix(_sessionId) + ".body")).Length;
         File.AppendAllText(headerPath, $"3,{bodyLength},50{Environment.NewLine}");
 
         _store = (FileStore)_factory!.Create(_sessionId);
@@ -329,7 +329,7 @@ public class FileStoreTests
         IMessageStore store = _store!;
         store.SetAndIncrNextSenderMsgSeqNum(1, "first");
 
-        string headerPath = Path.Combine(_storeDirectory, FileStore.Prefix(_sessionId) + ".header");
+        string headerPath = Path.Join(_storeDirectory, FileStore.Prefix(_sessionId) + ".header");
         using (var locker = new FileStream(headerPath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite))
         {
             locker.Lock(0, 1_000_000);
@@ -358,7 +358,7 @@ public class FileStoreTests
         store.SetAndIncrNextSenderMsgSeqNum(2, "second");
         _store!.Dispose();
 
-        string headerPath = Path.Combine(_storeDirectory, FileStore.Prefix(_sessionId) + ".header");
+        string headerPath = Path.Join(_storeDirectory, FileStore.Prefix(_sessionId) + ".header");
         File.AppendAllText(headerPath, "3,0,1");
 
         _store = (FileStore)_factory!.Create(_sessionId);
@@ -509,7 +509,7 @@ public class FileStoreTests
         IMessageStore store = _store!;
         store.SetAndIncrNextSenderMsgSeqNum(1, "first");
 
-        string headerPath = Path.Combine(_storeDirectory, FileStore.Prefix(_sessionId) + ".header");
+        string headerPath = Path.Join(_storeDirectory, FileStore.Prefix(_sessionId) + ".header");
         bool failOpen = false;
         _store!.HeaderStreamDecorator = s =>
         {
@@ -578,7 +578,7 @@ public class FileStoreTests
         _store!.NextSenderMsgSeqNum = 5;
         _store.Dispose();
 
-        string headerPath = Path.Combine(_storeDirectory, FileStore.Prefix(_sessionId) + ".header");
+        string headerPath = Path.Join(_storeDirectory, FileStore.Prefix(_sessionId) + ".header");
         File.Delete(headerPath);
         Directory.CreateDirectory(headerPath);
         Assert.Catch<Exception>(() => _factory!.Create(_sessionId));
@@ -700,7 +700,7 @@ public class FileStoreTests
         Assert.That(_store.NextTargetMsgSeqNum, Is.EqualTo(1));
     }
 
-    private string ResetMarkerPath => Path.Combine(_storeDirectory, FileStore.Prefix(_sessionId) + ".reset");
+    private string ResetMarkerPath => Path.Join(_storeDirectory, FileStore.Prefix(_sessionId) + ".reset");
 
     /// <summary>
     /// Reset deletes several files; a crash part-way through would otherwise mix a fresh
@@ -809,7 +809,7 @@ public class FileStoreTests
         IMessageStore store = _store!;
         store.SetAndIncrNextSenderMsgSeqNum(1, "first");
 
-        string sessionPath = Path.Combine(_storeDirectory, FileStore.Prefix(_sessionId) + ".session");
+        string sessionPath = Path.Join(_storeDirectory, FileStore.Prefix(_sessionId) + ".session");
         File.Delete(sessionPath);
         Directory.CreateDirectory(sessionPath);
         Assert.Catch<Exception>(() => store.Refresh());
@@ -853,7 +853,7 @@ public class FileStoreTests
         store.SetAndIncrNextSenderMsgSeqNum(1, "first");
         store.SetAndIncrNextSenderMsgSeqNum(2, "second");
 
-        string bodyPath = Path.Combine(_storeDirectory, FileStore.Prefix(_sessionId) + ".body");
+        string bodyPath = Path.Join(_storeDirectory, FileStore.Prefix(_sessionId) + ".body");
         using (new FileStream(bodyPath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite))
             Assert.Catch<IOException>(() => store.Reset());
         _store!.Dispose();
@@ -865,7 +865,7 @@ public class FileStoreTests
         Assert.That(msgs, Is.Empty);
     }
 
-    private string SeqNumsPath => Path.Combine(_storeDirectory, FileStore.Prefix(_sessionId) + ".seqnums");
+    private string SeqNumsPath => Path.Join(_storeDirectory, FileStore.Prefix(_sessionId) + ".seqnums");
     private string ShadowPath => SeqNumsPath + ".shadow";
 
     /// <summary>
