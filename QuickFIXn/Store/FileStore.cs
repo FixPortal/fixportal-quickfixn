@@ -618,9 +618,12 @@ public class FileStore : IMessageStore
         // FP Enhancement: 2026-09-27 — the purge deletes several files, and a crash part-way
         // through left a fresh sequence beside the old session's messages, which a resend could
         // replay. Record the intent first: once the marker exists, the next Open() completes the
-        // purge, so a Reset either has not started or completes.
+        // purge, so a Reset either has not started or completes. The marker holds the .seqnums
+        // bytes it guards, so a marker left behind is completed only while the store is still
+        // the one it was written for (see CompleteInterruptedReset). It is written before
+        // anything changes, memory included: a failure here leaves the store exactly as it was.
+        System.IO.File.WriteAllText(_resetMarkerFileName, ReadAllFrom(_seqNumsFile));
         _cache.Reset();
-        using (System.IO.File.Create(_resetMarkerFileName)) { }
         PurgeFileCache();
         System.IO.File.Delete(_resetMarkerFileName);
         Open();
@@ -628,19 +631,37 @@ public class FileStore : IMessageStore
 
     /// <summary>
     /// FP Enhancement: 2026-09-27 — finish a Reset that was interrupted after writing its
-    /// marker. Runs with every stream closed, before anything is loaded.
+    /// marker. Runs with every stream closed, before anything is loaded. The Reset is completed
+    /// only while the marker still guards this store: .seqnums is missing (the purge had got
+    /// past it) or still holds the bytes the marker recorded. Anything else means another
+    /// writer has used the store since (an engine that predates the marker, after a rollback),
+    /// so the marker is stale: it is discarded and the store kept. A torn marker never matches,
+    /// which is right: a marker is complete before the purge starts.
     /// </summary>
     private void CompleteInterruptedReset()
     {
         if (!System.IO.File.Exists(_resetMarkerFileName))
             return;
-        _cache.Reset();
-        PurgeSingleFile(_seqNumsShadowFileName);
-        PurgeSingleFile(_seqNumsFileName);
-        PurgeSingleFile(_msgFileName);
-        PurgeSingleFile(_headerFileName);
-        PurgeSingleFile(_sessionFileName);
+        bool stillGuards = !System.IO.File.Exists(_seqNumsFileName)
+            || System.IO.File.ReadAllText(_seqNumsFileName) == System.IO.File.ReadAllText(_resetMarkerFileName);
+        if (stillGuards)
+        {
+            _cache.Reset();
+            PurgeSingleFile(_seqNumsShadowFileName);
+            PurgeSingleFile(_seqNumsFileName);
+            PurgeSingleFile(_msgFileName);
+            PurgeSingleFile(_headerFileName);
+            PurgeSingleFile(_sessionFileName);
+        }
         System.IO.File.Delete(_resetMarkerFileName);
+    }
+
+    private static string ReadAllFrom(System.IO.Stream s)
+    {
+        byte[] bytes = new byte[s.Length];
+        s.Seek(0, System.IO.SeekOrigin.Begin);
+        s.ReadExactly(bytes);
+        return Encoding.UTF8.GetString(bytes);
     }
 
     public void Refresh()
