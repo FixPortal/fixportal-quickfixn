@@ -35,7 +35,14 @@
     "",
     "Do NOT re-add it without first removing the corresponding assertions from the guard.",
     "Deleting the guard itself needs no reviewer: \"Review policy intact\" is a REQUIRED",
-    "status check, so removing the workflow means the check never reports and no PR merges."
+    "status check, so removing the workflow means the check never reports and no PR merges.",
+    "",
+    "QuickFIXn/Store/** is HIGH and in 'composition' (2026-09-27). The message store holds FIX",
+    "session state across restarts: its write order decides whether a crash reuses a sequence",
+    "number or replays an unsent message. PR #97 changed it and the gate tiered it NORMAL with",
+    "no composition review, because no built-in composition glob matches *Store*; the review",
+    "run afterwards found a real defect. 'composition' REPLACES the hook's built-in globs rather",
+    "than extending them, so the first seven entries restate those defaults - keep them."
   ],
 
   "version": 1,
@@ -54,7 +61,19 @@
     "DDTool/**",
     ".github/workflows/review-tier.yml",
     ".github/canonical-assets.json",
-    ".config/dotnet-tools.json"
+    ".config/dotnet-tools.json",
+    "QuickFIXn/Store/**"
+  ],
+
+  "composition": [
+    "**/*Handler.cs",
+    "**/*Saga*.cs",
+    "**/*DbContext.cs",
+    "**/*Wolverine*",
+    "**/*Outbox*",
+    "**/*Inbox*",
+    "**/*Session*.cs",
+    "QuickFIXn/Store/**"
   ],
 
   "low": [
