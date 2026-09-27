@@ -612,6 +612,15 @@ public class FileStore : IMessageStore
 
     public void Reset()
     {
+        // FP Enhancement: 2026-09-27 — a pending .seqnums record means .seqnums may be torn and
+        // the shadow is its only witness; the purge deletes that witness first. Write the record
+        // before purging, so a Reset interrupted after the shadow delete leaves a complete
+        // .seqnums. If that write fails, Reset throws before deleting anything.
+        if (_seqNumsPending is { } pending)
+        {
+            WriteSeqNums(pending);
+            _seqNumsPending = null;
+        }
         _cache.Reset();
         PurgeFileCache();
         Open();

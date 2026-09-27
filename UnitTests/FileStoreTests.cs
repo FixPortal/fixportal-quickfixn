@@ -673,6 +673,32 @@ public class FileStoreTests
         Assert.That(File.Exists(SeqNumsPath), Is.True);
     }
 
+    /// <summary>
+    /// Reset must not delete the shadow while it is still the only witness of a pending
+    /// .seqnums record: it writes that record first. Here the .seqnums write for 99 -> 100
+    /// failed, then Reset deletes the shadow but fails to delete .seqnums (another handle holds
+    /// it open without delete sharing, which refuses the delete only on Windows). The next load
+    /// must see 100, not the record the failed write left behind.
+    /// </summary>
+    [Test]
+    [Platform("Win")]
+    public void Reset_writes_a_pending_seqnums_record_before_deleting_its_witness()
+    {
+        _store!.NextTargetMsgSeqNum = 50;
+        _store.NextSenderMsgSeqNum = 99;
+
+        _store.AfterSeqNumsShadowWrite = () => throw new IOException("simulated .seqnums write failure");
+        Assert.Throws<IOException>(() => _store.NextSenderMsgSeqNum = 100);
+        _store.AfterSeqNumsShadowWrite = null;
+
+        using (new FileStream(SeqNumsPath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite))
+            Assert.Catch<IOException>(() => _store.Reset());
+        _store.Dispose();
+
+        _store = (FileStore)_factory!.Create(_sessionId);
+        Assert.That(_store.NextSenderMsgSeqNum, Is.EqualTo(100));
+    }
+
     private string SeqNumsPath => Path.Combine(_storeDirectory, FileStore.Prefix(_sessionId) + ".seqnums");
     private string ShadowPath => SeqNumsPath + ".shadow";
 
