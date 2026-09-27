@@ -592,6 +592,52 @@ public class FileStoreTests
     }
 
     /// <summary>
+    /// The process can die after .seqnums is written but before the shadow is retired. Load
+    /// must retire it, or a later rollback of .seqnums to exactly the previous record (the
+    /// shape of an overwrite interrupted before its first byte) would be overridden.
+    /// </summary>
+    [Test]
+    public void Shadow_left_by_a_crash_after_the_seqnums_write_is_retired_at_load()
+    {
+        _store!.NextTargetMsgSeqNum = 50;
+        _store.NextSenderMsgSeqNum = 99;
+        CrashInsideSeqNumsUpdate(100);
+        File.WriteAllText(SeqNumsPath, SeqNumsRecord(100, 50)); // the .seqnums write completed
+
+        _store = (FileStore)_factory!.Create(_sessionId);
+        Assert.That(_store.NextSenderMsgSeqNum, Is.EqualTo(100));
+        _store.Dispose();
+
+        File.WriteAllText(SeqNumsPath, SeqNumsRecord(99, 50)); // operator rolls back
+
+        _store = (FileStore)_factory!.Create(_sessionId);
+        Assert.That(_store.NextSenderMsgSeqNum, Is.EqualTo(99));
+    }
+
+    /// <summary>
+    /// The recovery at load must repair .seqnums while the shadow still stands as its witness;
+    /// rewriting the shadow first would expose the only witness to a torn write.
+    /// </summary>
+    [Test]
+    public void Recovery_at_load_does_not_rewrite_the_shadow()
+    {
+        _store!.NextTargetMsgSeqNum = 50;
+        _store.NextSenderMsgSeqNum = 99;
+
+        // Die after the shadow for 99 -> 100 is written; .seqnums still holds 99/50.
+        _store.AfterSeqNumsShadowWrite = () => throw new SimulatedSeqNumsCrash();
+        Assert.Throws<SimulatedSeqNumsCrash>(() => _store.NextSenderMsgSeqNum = 100);
+
+        // Reload with the seam still armed: the repair must not write the shadow again.
+        Assert.DoesNotThrow(() => _store.Refresh());
+        _store.AfterSeqNumsShadowWrite = null;
+        Assert.That(_store.NextSenderMsgSeqNum, Is.EqualTo(100));
+        _store.Dispose();
+        Assert.That(File.ReadAllText(SeqNumsPath), Is.EqualTo(SeqNumsRecord(100, 50)));
+        Assert.That(new FileInfo(ShadowPath).Length, Is.EqualTo(0));
+    }
+
+    /// <summary>
     /// .seqnums rewritten by someone other than this store (an engine that predates the
     /// shadow, or an operator's deliberate edit) must win; otherwise sequence numbers the
     /// other writer already used would be reused.
