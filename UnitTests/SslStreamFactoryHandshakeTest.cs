@@ -30,7 +30,7 @@ public class SslStreamFactoryHandshakeTest
     [SetUp]
     public void SetUp()
     {
-        _dir = Path.Combine(TestContext.CurrentContext.TestDirectory, "ssl-handshake-" + Guid.NewGuid().ToString("N"));
+        _dir = Path.Join(TestContext.CurrentContext.TestDirectory, "ssl-handshake-" + Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(_dir);
     }
 
@@ -72,14 +72,14 @@ public class SslStreamFactoryHandshakeTest
 
     private string SavePfx(X509Certificate2 cert, string fileName, string password)
     {
-        string path = Path.Combine(_dir, fileName);
+        string path = Path.Join(_dir, fileName);
         File.WriteAllBytes(path, cert.Export(X509ContentType.Pfx, password));
         return path;
     }
 
     private string SaveCer(X509Certificate2 cert, string fileName)
     {
-        string path = Path.Combine(_dir, fileName);
+        string path = Path.Join(_dir, fileName);
         File.WriteAllBytes(path, cert.Export(X509ContentType.Cert));
         return path;
     }

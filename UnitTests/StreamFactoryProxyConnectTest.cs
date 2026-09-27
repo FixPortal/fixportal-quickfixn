@@ -28,11 +28,12 @@ public class StreamFactoryProxyConnectTest
     [TearDown]
     public void TearDown() => WebRequest.DefaultWebProxy = _originalProxy;
 
-    private static (TcpListener listener, int port) StartLocalProxy()
+    private static TcpListener StartLocalProxy(out int port)
     {
         TcpListener listener = new TcpListener(IPAddress.Loopback, 0);
         listener.Start();
-        return (listener, ((IPEndPoint)listener.LocalEndpoint).Port);
+        port = ((IPEndPoint)listener.LocalEndpoint).Port;
+        return listener;
     }
 
     private static async Task RespondOnceAsync(TcpListener listener, string response)
@@ -55,25 +56,18 @@ public class StreamFactoryProxyConnectTest
     [Test]
     public async Task SuccessfulConnectStatusEstablishesTunnel()
     {
-        var (listener, port) = StartLocalProxy();
+        using TcpListener listener = StartLocalProxy(out int port);
         WebRequest.DefaultWebProxy = new WebProxy($"http://127.0.0.1:{port}");
-        try
-        {
-            Task proxyTask = RespondOnceAsync(listener, "HTTP/1.1 200 Connection Established\r\n\r\n");
+        Task proxyTask = RespondOnceAsync(listener, "HTTP/1.1 200 Connection Established\r\n\r\n");
 
-            using var stream = StreamFactory.CreateClientStream(
-                new IPEndPoint(IPAddress.Loopback, 65000),
-                ProxiedSettings(),
-                NullQuickFixLoggerFactory.Instance,
-                CancellationToken.None);
+        using var stream = StreamFactory.CreateClientStream(
+            new IPEndPoint(IPAddress.Loopback, 65000),
+            ProxiedSettings(),
+            NullQuickFixLoggerFactory.Instance,
+            CancellationToken.None);
 
-            Assert.That(stream, Is.Not.Null);
-            await proxyTask;
-        }
-        finally
-        {
-            listener.Stop();
-        }
+        Assert.That(stream, Is.Not.Null);
+        await proxyTask;
     }
 
     [Test]
@@ -81,47 +75,33 @@ public class StreamFactoryProxyConnectTest
     {
         // RFC 9110: any 2xx response to CONNECT is a successful tunnel establishment, not
         // only 200. Some proxies legitimately answer 201/204.
-        var (listener, port) = StartLocalProxy();
+        using TcpListener listener = StartLocalProxy(out int port);
         WebRequest.DefaultWebProxy = new WebProxy($"http://127.0.0.1:{port}");
-        try
-        {
-            Task proxyTask = RespondOnceAsync(listener, "HTTP/1.1 204 No Content\r\n\r\n");
+        Task proxyTask = RespondOnceAsync(listener, "HTTP/1.1 204 No Content\r\n\r\n");
 
-            using var stream = StreamFactory.CreateClientStream(
-                new IPEndPoint(IPAddress.Loopback, 65000),
-                ProxiedSettings(),
-                NullQuickFixLoggerFactory.Instance,
-                CancellationToken.None);
+        using var stream = StreamFactory.CreateClientStream(
+            new IPEndPoint(IPAddress.Loopback, 65000),
+            ProxiedSettings(),
+            NullQuickFixLoggerFactory.Instance,
+            CancellationToken.None);
 
-            Assert.That(stream, Is.Not.Null);
-            await proxyTask;
-        }
-        finally
-        {
-            listener.Stop();
-        }
+        Assert.That(stream, Is.Not.Null);
+        await proxyTask;
     }
 
     [Test]
     public async Task NonSuccessStatusIsRejected()
     {
-        var (listener, port) = StartLocalProxy();
+        using TcpListener listener = StartLocalProxy(out int port);
         WebRequest.DefaultWebProxy = new WebProxy($"http://127.0.0.1:{port}");
-        try
-        {
-            Task proxyTask = RespondOnceAsync(listener, "HTTP/1.1 407 Proxy Authentication Required\r\n\r\n");
+        Task proxyTask = RespondOnceAsync(listener, "HTTP/1.1 407 Proxy Authentication Required\r\n\r\n");
 
-            Assert.Throws<ApplicationException>(() => StreamFactory.CreateClientStream(
-                new IPEndPoint(IPAddress.Loopback, 65000),
-                ProxiedSettings(),
-                NullQuickFixLoggerFactory.Instance,
-                CancellationToken.None));
-            await proxyTask;
-        }
-        finally
-        {
-            listener.Stop();
-        }
+        Assert.Throws<ApplicationException>(() => StreamFactory.CreateClientStream(
+            new IPEndPoint(IPAddress.Loopback, 65000),
+            ProxiedSettings(),
+            NullQuickFixLoggerFactory.Instance,
+            CancellationToken.None));
+        await proxyTask;
     }
 
     [Test]
@@ -129,24 +109,17 @@ public class StreamFactoryProxyConnectTest
     {
         // The response body must not fool the "200" substring search: the status line fails but
         // the body text (falsely) mentions "200".
-        var (listener, port) = StartLocalProxy();
+        using TcpListener listener = StartLocalProxy(out int port);
         WebRequest.DefaultWebProxy = new WebProxy($"http://127.0.0.1:{port}");
-        try
-        {
-            Task proxyTask = RespondOnceAsync(
-                listener,
-                "HTTP/1.1 502 Bad Gateway\r\n\r\nUpstream returned code 200 earlier today\r\n");
+        Task proxyTask = RespondOnceAsync(
+            listener,
+            "HTTP/1.1 502 Bad Gateway\r\n\r\nUpstream returned code 200 earlier today\r\n");
 
-            Assert.Throws<ApplicationException>(() => StreamFactory.CreateClientStream(
-                new IPEndPoint(IPAddress.Loopback, 65000),
-                ProxiedSettings(),
-                NullQuickFixLoggerFactory.Instance,
-                CancellationToken.None));
-            await proxyTask;
-        }
-        finally
-        {
-            listener.Stop();
-        }
+        Assert.Throws<ApplicationException>(() => StreamFactory.CreateClientStream(
+            new IPEndPoint(IPAddress.Loopback, 65000),
+            ProxiedSettings(),
+            NullQuickFixLoggerFactory.Instance,
+            CancellationToken.None));
+        await proxyTask;
     }
 }
