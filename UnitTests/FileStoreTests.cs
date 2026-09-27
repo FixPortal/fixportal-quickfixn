@@ -752,6 +752,25 @@ public class FileStoreTests
     }
 
     /// <summary>
+    /// A marker is written to a temporary name and renamed into place, so a left-behind
+    /// temporary marker means the Reset never recorded its intent: the store is kept and the
+    /// temporary file removed.
+    /// </summary>
+    [Test]
+    public void Leftover_temporary_reset_marker_is_ignored_and_removed()
+    {
+        IMessageStore store = _store!;
+        store.SetAndIncrNextSenderMsgSeqNum(1, "first");
+        _store!.Dispose();
+
+        File.WriteAllText(ResetMarkerPath + ".tmp", File.ReadAllText(SeqNumsPath));
+
+        _store = (FileStore)_factory!.Create(_sessionId);
+        Assert.That(_store.NextSenderMsgSeqNum, Is.EqualTo(2));
+        Assert.That(File.Exists(ResetMarkerPath + ".tmp"), Is.False);
+    }
+
+    /// <summary>
     /// If Reset cannot record its intent (here a directory occupies the marker's path), it must
     /// fail before changing anything, in memory or on disk: a session that swallows the
     /// exception must not carry on from a reset in-memory sequence over the old store.

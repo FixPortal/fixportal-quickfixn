@@ -622,7 +622,11 @@ public class FileStore : IMessageStore
         // bytes it guards, so a marker left behind is completed only while the store is still
         // the one it was written for (see CompleteInterruptedReset). It is written before
         // anything changes, memory included: a failure here leaves the store exactly as it was.
-        System.IO.File.WriteAllText(_resetMarkerFileName, ReadAllFrom(_seqNumsFile));
+        // Written to a temporary name and renamed into place, so a marker is never torn: a
+        // retried Reset replaces a valid marker in one step instead of truncating it first.
+        string markerTemp = _resetMarkerFileName + ".tmp";
+        System.IO.File.WriteAllText(markerTemp, ReadAllFrom(_seqNumsFile));
+        System.IO.File.Move(markerTemp, _resetMarkerFileName, overwrite: true);
         _cache.Reset();
         PurgeFileCache();
         System.IO.File.Delete(_resetMarkerFileName);
@@ -640,6 +644,8 @@ public class FileStore : IMessageStore
     /// </summary>
     private void CompleteInterruptedReset()
     {
+        // A temporary marker is a Reset that never recorded its intent: not started.
+        PurgeSingleFile(_resetMarkerFileName + ".tmp");
         if (!System.IO.File.Exists(_resetMarkerFileName))
             return;
         bool stillGuards = !System.IO.File.Exists(_seqNumsFileName)
