@@ -534,4 +534,104 @@ public class FileStoreTests
         _store!.Get(1, 2, msgs);
         Assert.That(msgs, Is.EqualTo(new List<string> { "b" }));
     }
+
+    private string SeqNumsPath => Path.Combine(_storeDirectory, FileStore.Prefix(_sessionId) + ".seqnums");
+    private string ShadowPath => SeqNumsPath + ".shadow";
+
+    /// <summary>
+    /// A partial in-place overwrite of .seqnums leaves the new value's leading digits in front
+    /// of the old value's trailing ones (99 -> 100 torn to 199). The record still parses, so it
+    /// must be recovered from the checksummed shadow rather than loaded.
+    /// </summary>
+    [Test]
+    public void Torn_seqnums_record_is_recovered_from_the_shadow()
+    {
+        _store!.NextTargetMsgSeqNum = 50;
+        _store.NextSenderMsgSeqNum = 99;
+        _store.NextSenderMsgSeqNum = 100;
+        _store.Dispose();
+
+        // The 99 -> 100 overwrite torn after 18 bytes: new leading digits, old trailing ones.
+        File.WriteAllText(SeqNumsPath,
+            199UL.ToString("D20") + " : " + 50UL.ToString("D20") + "  ");
+
+        _store = (FileStore)_factory!.Create(_sessionId);
+        Assert.That(_store.NextSenderMsgSeqNum, Is.EqualTo(100));
+        Assert.That(_store.NextTargetMsgSeqNum, Is.EqualTo(50));
+    }
+
+    /// <summary>
+    /// .seqnums rewritten by someone other than this store (an engine that predates the
+    /// shadow, or an operator's deliberate edit) must win over a stale shadow; otherwise
+    /// sequence numbers the other writer already used would be reused.
+    /// </summary>
+    [Test]
+    public void Seqnums_written_by_another_writer_wins_over_a_stale_shadow()
+    {
+        _store!.NextSenderMsgSeqNum = 100;
+        _store.NextTargetMsgSeqNum = 50;
+        _store.Dispose();
+
+        File.WriteAllText(SeqNumsPath,
+            150UL.ToString("D20") + " : " + 60UL.ToString("D20") + "  ");
+
+        _store = (FileStore)_factory!.Create(_sessionId);
+        Assert.That(_store.NextSenderMsgSeqNum, Is.EqualTo(150));
+        Assert.That(_store.NextTargetMsgSeqNum, Is.EqualTo(60));
+    }
+
+    /// <summary>
+    /// A torn shadow means the crash came while it was being written, before .seqnums was
+    /// touched, so .seqnums still holds the previous complete record.
+    /// </summary>
+    [Test]
+    public void Torn_shadow_falls_back_to_the_seqnums_record()
+    {
+        _store!.NextTargetMsgSeqNum = 50;
+        _store.NextSenderMsgSeqNum = 100;
+        _store.Dispose();
+
+        // Interrupted while writing the shadow for 1/50 -> 100/50: .seqnums still holds 1/50,
+        // and the shadow's new record is torn to 109, which would otherwise pass as a partial
+        // overwrite of 1/50. Only the checksum can reject it.
+        File.WriteAllText(SeqNumsPath, 1UL.ToString("D20") + " : " + 50UL.ToString("D20") + "  ");
+        string shadow = File.ReadAllText(ShadowPath);
+        File.WriteAllText(ShadowPath, shadow.Substring(0, 19) + "9" + shadow.Substring(20));
+
+        _store = (FileStore)_factory!.Create(_sessionId);
+        Assert.That(_store.NextSenderMsgSeqNum, Is.EqualTo(1));
+        Assert.That(_store.NextTargetMsgSeqNum, Is.EqualTo(50));
+    }
+
+    /// <summary>
+    /// A store written before the shadow existed has only .seqnums; it still loads.
+    /// </summary>
+    [Test]
+    public void Seqnums_without_a_shadow_still_load()
+    {
+        _store!.NextSenderMsgSeqNum = 7;
+        _store.NextTargetMsgSeqNum = 9;
+        _store.Dispose();
+        File.Delete(ShadowPath);
+
+        _store = (FileStore)_factory!.Create(_sessionId);
+        Assert.That(_store.NextSenderMsgSeqNum, Is.EqualTo(7));
+        Assert.That(_store.NextTargetMsgSeqNum, Is.EqualTo(9));
+    }
+
+    /// <summary>
+    /// Reset must not leave a stale shadow that would win over the reset sequence numbers.
+    /// </summary>
+    [Test]
+    public void Reset_leaves_no_stale_shadow()
+    {
+        _store!.NextSenderMsgSeqNum = 100;
+        _store.NextTargetMsgSeqNum = 50;
+
+        _store.Reset();
+        RebuildStore();
+
+        Assert.That(_store!.NextSenderMsgSeqNum, Is.EqualTo(1));
+        Assert.That(_store.NextTargetMsgSeqNum, Is.EqualTo(1));
+    }
 }
