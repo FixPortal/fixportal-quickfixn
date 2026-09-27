@@ -771,6 +771,33 @@ public class FileStoreTests
     }
 
     /// <summary>
+    /// An editor may have saved .seqnums with a UTF-8 byte-order mark. The Reset marker must
+    /// still match what the completion check reads, or an interrupted Reset would be discarded
+    /// and leave the old session's messages. Interrupted at the first purge step, while
+    /// .seqnums still exists, by a shadow delete that fails (another handle holds it open
+    /// without delete sharing; Windows only).
+    /// </summary>
+    [Test]
+    [Platform("Win")]
+    public void Interrupted_reset_completes_when_seqnums_has_a_byte_order_mark()
+    {
+        IMessageStore store = _store!;
+        store.SetAndIncrNextSenderMsgSeqNum(1, "first");
+        _store!.Dispose();
+        File.WriteAllText(SeqNumsPath, File.ReadAllText(SeqNumsPath), new System.Text.UTF8Encoding(true));
+        _store = (FileStore)_factory!.Create(_sessionId);
+
+        using (new FileStream(ShadowPath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite))
+            Assert.Catch<IOException>(() => _store.Reset());
+        _store.Dispose();
+
+        _store = (FileStore)_factory!.Create(_sessionId);
+        var msgs = new List<string>();
+        _store.Get(1, 1, msgs);
+        Assert.That(msgs, Is.Empty);
+    }
+
+    /// <summary>
     /// A Refresh that fails after closing the streams (here a directory where .session should
     /// be makes the reload throw before any stream reopens) leaves them disposed. Reset must
     /// still work from that state, as upstream's did: its marker cannot depend on a live
