@@ -625,7 +625,7 @@ public class FileStore : IMessageStore
         // Written to a temporary name and renamed into place, so a marker is never torn: a
         // retried Reset replaces a valid marker in one step instead of truncating it first.
         string markerTemp = _resetMarkerFileName + ".tmp";
-        System.IO.File.WriteAllText(markerTemp, ReadAllFrom(_seqNumsFile));
+        System.IO.File.WriteAllText(markerTemp, CurrentSeqNumsBytes());
         System.IO.File.Move(markerTemp, _resetMarkerFileName, overwrite: true);
         _cache.Reset();
         PurgeFileCache();
@@ -662,12 +662,25 @@ public class FileStore : IMessageStore
         System.IO.File.Delete(_resetMarkerFileName);
     }
 
-    private static string ReadAllFrom(System.IO.Stream s)
+    /// <summary>
+    /// The .seqnums bytes a Reset marker guards. Read through the store's own handle while it
+    /// is open: opening the file again by path is refused by that handle's share mode on
+    /// Windows. A failed Open() can leave the handle disposed, and then nothing of ours holds
+    /// the file, so it is read by path (missing means ""), keeping Reset usable from that state.
+    /// </summary>
+    private string CurrentSeqNumsBytes()
     {
-        byte[] bytes = new byte[s.Length];
-        s.Seek(0, System.IO.SeekOrigin.Begin);
-        s.ReadExactly(bytes);
-        return Encoding.UTF8.GetString(bytes);
+        try
+        {
+            byte[] bytes = new byte[_seqNumsFile.Length];
+            _seqNumsFile.Seek(0, System.IO.SeekOrigin.Begin);
+            _seqNumsFile.ReadExactly(bytes);
+            return Encoding.UTF8.GetString(bytes);
+        }
+        catch (ObjectDisposedException)
+        {
+            return System.IO.File.Exists(_seqNumsFileName) ? System.IO.File.ReadAllText(_seqNumsFileName) : "";
+        }
     }
 
     public void Refresh()
