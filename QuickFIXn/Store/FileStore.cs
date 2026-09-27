@@ -79,7 +79,7 @@ public class FileStore : IMessageStore
         _msgFileName = System.IO.Path.Combine(normalizedPath, prefix + ".body");
         _headerFileName = System.IO.Path.Combine(normalizedPath, prefix + ".header");
         _sessionFileName = System.IO.Path.Combine(normalizedPath, prefix + ".session");
-        _resetMarkerFileName = System.IO.Path.Combine(normalizedPath, prefix + ".reset");
+        _resetMarkerFileName = System.IO.Path.Join(normalizedPath, prefix + ".reset");
 
         // The compiler isn't smart enough to see that Open() initializes these 3 vars,
         // but we can use "= null!" to make it accept that these are non-null
@@ -438,7 +438,12 @@ public class FileStore : IMessageStore
                 TruncateTo(_headerFileName, _headerCleanLength);
                 _headerFile = OpenHeader();
             }
-            catch (Exception repairFailure)
+            // The repair's own failures are I/O-class (Dispose, truncate, reopen); those are
+            // wrapped with the write failure that caused the repair. Anything else is not a
+            // repair failure and propagates as it is.
+            catch (Exception repairFailure) when (repairFailure is System.IO.IOException
+                                                    or UnauthorizedAccessException
+                                                    or ObjectDisposedException)
             {
                 throw new System.IO.IOException(
                     "Header write failed and the header could not be cut back to its last complete entry.",
