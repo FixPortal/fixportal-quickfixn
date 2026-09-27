@@ -370,9 +370,10 @@ public class FileStoreTests
         Assert.That(msgs, Is.EqualTo(new List<string> { "first", "second", "third" }));
     }
 
-    /// <summary>Writes only the first few bytes of an armed write, then fails: a short write
-    /// followed by ENOSPC.</summary>
-    private sealed class ShortWriteStream(Stream inner, Func<bool> armed) : Stream
+    /// <summary>Lands only the first <paramref name="landed"/> bytes of an armed write, then
+    /// fails: a short write followed by ENOSPC, or (landed &gt;= count) a write that completed
+    /// but still reported failure.</summary>
+    private sealed class ShortWriteStream(Stream inner, Func<bool> armed, int landed = 3) : Stream
     {
         public override void Write(byte[] buffer, int offset, int count)
         {
@@ -381,7 +382,7 @@ public class FileStoreTests
                 inner.Write(buffer, offset, count);
                 return;
             }
-            inner.Write(buffer, offset, Math.Min(3, count));
+            inner.Write(buffer, offset, Math.Min(landed, count));
             inner.Flush();
             throw new IOException("simulated short write (ENOSPC)");
         }
@@ -425,5 +426,76 @@ public class FileStoreTests
         var msgs = new List<string>();
         _store!.Get(1, 3, msgs);
         Assert.That(msgs, Is.EqualTo(new List<string> { "first", "third" }));
+    }
+
+    /// <summary>
+    /// C1: a header write that lands the whole line and still reports failure must not leave
+    /// that line behind. The session treats the number as unsent and gap-fills it; a surviving
+    /// complete line would replay the unsent message as PossDup after restart.
+    /// </summary>
+    [Test]
+    public void Header_write_that_completes_but_reports_failure_leaves_no_entry()
+    {
+        IMessageStore store = _store!;
+        store.SetAndIncrNextSenderMsgSeqNum(1, "first");
+
+        bool armed = false;
+        _store!.HeaderStreamDecorator = s => new ShortWriteStream(s, () => armed, landed: int.MaxValue);
+        store.Refresh();
+
+        armed = true;
+        Assert.Throws<IOException>(() => store.SetAndIncrNextSenderMsgSeqNum(2, "second"));
+        armed = false;
+
+        _store.HeaderStreamDecorator = null;
+        RebuildStore();
+
+        var msgs = new List<string>();
+        _store!.Get(1, 2, msgs);
+        Assert.That(msgs, Is.EqualTo(new List<string> { "first" }));
+    }
+
+    /// <summary>
+    /// C1: if the repair after a failed header write itself fails, the original failure is
+    /// kept, the next write still throws (nothing is sent on a header that is not back on a
+    /// line boundary) while retrying the repair, and the store recovers once it succeeds.
+    /// </summary>
+    [Test]
+    public void Failed_header_repair_keeps_the_cause_fails_closed_and_recovers()
+    {
+        IMessageStore store = _store!;
+        store.SetAndIncrNextSenderMsgSeqNum(1, "first");
+
+        bool armed = false;
+        bool failReopen = false;
+        _store!.HeaderStreamDecorator = s =>
+        {
+            if (failReopen)
+            {
+                s.Dispose();
+                throw new IOException("simulated reopen failure");
+            }
+            return new ShortWriteStream(s, () => armed);
+        };
+        store.Refresh();
+
+        armed = true;
+        failReopen = true;
+        var failure = Assert.Throws<IOException>(() => store.SetAndIncrNextSenderMsgSeqNum(2, "second"));
+        Assert.That(failure!.InnerException, Is.TypeOf<AggregateException>());
+        Assert.That(System.Linq.Enumerable.Select(((AggregateException)failure.InnerException!).InnerExceptions, e => e.Message),
+            Is.EqualTo(new[] { "simulated short write (ENOSPC)", "simulated reopen failure" }));
+
+        armed = false;
+        failReopen = false;
+        Assert.Catch<Exception>(() => store.SetAndIncrNextSenderMsgSeqNum(3, "third"));
+        store.SetAndIncrNextSenderMsgSeqNum(4, "fourth");
+
+        _store.HeaderStreamDecorator = null;
+        RebuildStore();
+
+        var msgs = new List<string>();
+        _store!.Get(1, 4, msgs);
+        Assert.That(msgs, Is.EqualTo(new List<string> { "first", "fourth" }));
     }
 }
