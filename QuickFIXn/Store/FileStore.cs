@@ -104,11 +104,18 @@ public class FileStore : IMessageStore
         _msgFile = new System.IO.FileStream(_msgFileName, System.IO.FileMode.OpenOrCreate, System.IO.FileAccess.ReadWrite);
         _headerFile = OpenHeader();
 
-        if (_seqNumsRecovered)
+        // FP Enhancement: 2026-09-27 — finish what load decided about .seqnums. A recovered
+        // record is written straight into .seqnums while the shadow still stands as its witness
+        // (a torn repair is again an interrupted overwrite of the same shadow). Then the shadow
+        // is retired unconditionally: once load has settled, any shadow is stale, and a stale
+        // shadow could later override a deliberate edit shaped like a torn overwrite.
+        if (_seqNumsRepair is { } repair)
         {
-            _seqNumsRecovered = false;
-            SetSeqNum();
+            _seqNumsRepair = null;
+            WriteRecord(_seqNumsFile, repair);
+            _seqNumsOnDisk = repair;
         }
+        _seqNumsShadowFile.SetLength(0);
     }
 
     /// <summary>
@@ -216,6 +223,7 @@ public class FileStore : IMessageStore
     private void ConstructFromFileCache()
     {
         _offsets.Clear();
+        _seqNumsRepair = null;
         TruncateToLastCompleteLine(_headerFileName);
         if (System.IO.File.Exists(_headerFileName))
         {
@@ -252,9 +260,8 @@ public class FileStore : IMessageStore
                 && IsInterruptedOverwrite(onDisk, previous, next))
             {
                 record = next;
-                // Rewrite .seqnums as soon as the streams are open, so the torn record does not
-                // outlive the shadow that is its only witness.
-                _seqNumsRecovered = onDisk != next;
+                // Open() writes it into .seqnums before retiring the shadow.
+                _seqNumsRepair = onDisk != next ? next : null;
             }
 
             string[] parts = record.Split(':');
@@ -486,8 +493,8 @@ public class FileStore : IMessageStore
     /// </summary>
     internal Action? AfterSeqNumsShadowWrite { get; set; }
 
-    /// <summary>Set at load when the shadow's record replaced a torn .seqnums.</summary>
-    private bool _seqNumsRecovered;
+    /// <summary>Set at load when the shadow's record replaced a torn .seqnums; Open() writes it.</summary>
+    private string? _seqNumsRepair;
 
     /// <summary>The .seqnums bytes currently on disk, as far as this store knows.</summary>
     private string _seqNumsOnDisk = "";
@@ -501,8 +508,10 @@ public class FileStore : IMessageStore
             fs.ReadExactly(bytes);
             return Encoding.UTF8.GetString(bytes);
         }
-        catch (System.IO.IOException)
+        catch (Exception)
         {
+            // Called from a catch: never replace the original write failure. "" makes the next
+            // shadow describe nothing, and load then falls back to .seqnums as upstream does.
             return "";
         }
     }
