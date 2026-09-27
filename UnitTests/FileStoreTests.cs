@@ -716,7 +716,8 @@ public class FileStoreTests
         store.NextTargetMsgSeqNum = 7;
         _store!.Dispose();
 
-        File.WriteAllBytes(ResetMarkerPath, Array.Empty<byte>()); // Reset began, then the process died
+        // Reset began (its marker guards the current .seqnums), then the process died.
+        File.WriteAllText(ResetMarkerPath, File.ReadAllText(SeqNumsPath));
 
         _store = (FileStore)_factory!.Create(_sessionId);
         Assert.That(_store.NextSenderMsgSeqNum, Is.EqualTo(1));
@@ -725,6 +726,50 @@ public class FileStoreTests
         _store.Get(1, 2, msgs);
         Assert.That(msgs, Is.Empty);
         Assert.That(File.Exists(ResetMarkerPath), Is.False);
+    }
+
+    /// <summary>
+    /// A marker guards the .seqnums it was written for. If another writer (an engine that
+    /// predates the marker, after a rollback) has since used the store, the marker is stale:
+    /// it is discarded and the store kept, never purged.
+    /// </summary>
+    [Test]
+    public void Stale_reset_marker_does_not_purge_a_store_written_since()
+    {
+        IMessageStore store = _store!;
+        store.SetAndIncrNextSenderMsgSeqNum(1, "first");
+        _store!.Dispose();
+
+        File.WriteAllText(ResetMarkerPath, File.ReadAllText(SeqNumsPath)); // interrupted Reset
+        File.WriteAllText(SeqNumsPath, SeqNumsRecord(500, 40));             // older engine ran on
+
+        _store = (FileStore)_factory!.Create(_sessionId);
+        Assert.That(_store.NextSenderMsgSeqNum, Is.EqualTo(500));
+        var msgs = new List<string>();
+        _store.Get(1, 1, msgs);
+        Assert.That(msgs, Is.EqualTo(new List<string> { "first" }));
+        Assert.That(File.Exists(ResetMarkerPath), Is.False);
+    }
+
+    /// <summary>
+    /// If Reset cannot record its intent (here a directory occupies the marker's path), it must
+    /// fail before changing anything, in memory or on disk: a session that swallows the
+    /// exception must not carry on from a reset in-memory sequence over the old store.
+    /// </summary>
+    [Test]
+    public void Reset_that_cannot_write_its_marker_changes_nothing()
+    {
+        IMessageStore store = _store!;
+        store.SetAndIncrNextSenderMsgSeqNum(1, "first");
+        Directory.CreateDirectory(ResetMarkerPath);
+
+        Assert.Catch<Exception>(() => store.Reset());
+        Directory.Delete(ResetMarkerPath);
+
+        Assert.That(store.NextSenderMsgSeqNum, Is.EqualTo(2));
+        var msgs = new List<string>();
+        store.Get(1, 1, msgs);
+        Assert.That(msgs, Is.EqualTo(new List<string> { "first" }));
     }
 
     /// <summary>
