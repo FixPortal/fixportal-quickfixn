@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Buffers;
 using System.Collections.Generic;
 using System.Text;
@@ -19,6 +19,8 @@ public class FileStore : IMessageStore
         public int Size { get; } = size;
     }
 
+    // FP Enhancement: 2026-09-27 — .seqnums.shadow and the .reset marker (see SetSeqNum and
+    // Reset); the header is a plain unbuffered Stream, not a StreamWriter (see OpenHeader).
     private readonly string _seqNumsFileName;
     private readonly string _seqNumsShadowFileName;
     private readonly string _msgFileName;
@@ -75,16 +77,16 @@ public class FileStore : IMessageStore
         string prefix = Prefix(sessionId);
 
         _seqNumsFileName = System.IO.Path.Combine(normalizedPath, prefix + ".seqnums");
-        _seqNumsShadowFileName = _seqNumsFileName + ".shadow";
+        _seqNumsShadowFileName = _seqNumsFileName + ".shadow"; // FP Enhancement: 2026-09-27 — see SetSeqNum
         _msgFileName = System.IO.Path.Combine(normalizedPath, prefix + ".body");
         _headerFileName = System.IO.Path.Combine(normalizedPath, prefix + ".header");
         _sessionFileName = System.IO.Path.Combine(normalizedPath, prefix + ".session");
-        _resetMarkerFileName = System.IO.Path.Join(normalizedPath, prefix + ".reset");
+        _resetMarkerFileName = System.IO.Path.Join(normalizedPath, prefix + ".reset"); // FP Enhancement: 2026-09-27 — see Reset
 
         // The compiler isn't smart enough to see that Open() initializes these 3 vars,
         // but we can use "= null!" to make it accept that these are non-null
         _seqNumsFile = null!;
-        _seqNumsShadowFile = null!;
+        _seqNumsShadowFile = null!; // FP Enhancement: 2026-09-27 — .seqnums.shadow
         _msgFile = null!;
         _headerFile = null!;
         // FP Enhancement: 2026-09-27 — a constructor that throws leaves its streams unreachable
@@ -107,7 +109,7 @@ public class FileStore : IMessageStore
     {
         Close();
 
-        CompleteInterruptedReset();
+        CompleteInterruptedReset(); // FP Enhancement: 2026-09-27 — see CompleteInterruptedReset.
         ConstructFromFileCache();
         InitializeSessionCreateTime();
 
@@ -167,6 +169,7 @@ public class FileStore : IMessageStore
     /// </summary>
     private long _headerCleanLength;
 
+    /// <summary>FP Enhancement: 2026-09-27 — cut a file back to a known-good length (the header repair).</summary>
     private static void TruncateTo(string path, long length)
     {
         // Missing after a Reset() whose OpenHeader failed, or unlinked externally (possible on
@@ -181,7 +184,7 @@ public class FileStore : IMessageStore
     }
 
     /// <summary>
-    /// Test-only fault seam: wraps the header stream when it is opened, so a test can make a
+    /// FP Enhancement: 2026-09-27 — test-only fault seam: wraps the header stream when it is opened, so a test can make a
     /// write land partially and then fail (a short write followed by ENOSPC), which no real
     /// fault can produce on demand on either platform.
     /// </summary>
@@ -191,7 +194,7 @@ public class FileStore : IMessageStore
     {
         // these vars will be null only during construction (ctor()->Open()->Close())
         _seqNumsFile?.Dispose();
-        _seqNumsShadowFile?.Dispose();
+        _seqNumsShadowFile?.Dispose(); // FP Enhancement: 2026-09-27 — .seqnums.shadow
         _msgFile?.Dispose();
         _headerFile?.Dispose();
     }
@@ -203,6 +206,8 @@ public class FileStore : IMessageStore
             System.IO.File.Delete(filename);
     }
 
+    // FP Enhancement: 2026-09-27 — upstream's PurgeSingleFile(StreamWriter, string) overload is
+    // removed: the header is now a plain Stream (see OpenHeader) and uses the Stream overload.
     private static void PurgeSingleFile(string filename)
     {
         if (System.IO.File.Exists(filename))
@@ -254,7 +259,9 @@ public class FileStore : IMessageStore
     private void ConstructFromFileCache()
     {
         _offsets.Clear();
-        _seqNumsPending = null; // load re-derives it from disk, shadow included
+        // FP Enhancement: 2026-09-27 — load re-derives any pending .seqnums record from disk,
+        // shadow included (see SetSeqNum), and first cuts a torn last header line.
+        _seqNumsPending = null;
         TruncateToLastCompleteLine(_headerFileName);
         if (System.IO.File.Exists(_headerFileName))
         {
@@ -283,6 +290,8 @@ public class FileStore : IMessageStore
 
         if (System.IO.File.Exists(_seqNumsFileName))
         {
+            // FP Enhancement: 2026-09-27 — a torn .seqnums is recovered from the shadow's
+            // record (see SetSeqNum); otherwise .seqnums is read as upstream reads it.
             string onDisk = System.IO.File.ReadAllText(_seqNumsFileName);
             _seqNumsOnDisk = onDisk;
 
@@ -394,7 +403,7 @@ public class FileStore : IMessageStore
     }
 
     /// <summary>
-    /// Test-only fault seam: invoked after each flushed write (body, header, sequence numbers).
+    /// FP Enhancement: 2026-09-26 — test-only fault seam: invoked after each flushed write (body, header, sequence numbers).
     /// Throwing from it models the process dying at that point.
     /// </summary>
     internal Action? AfterDurableWrite { get; set; }
@@ -529,7 +538,7 @@ public class FileStore : IMessageStore
     }
 
     /// <summary>
-    /// Writes .seqnums. On failure <see cref="_seqNumsOnDisk"/> is left as it was: the caller
+    /// FP Enhancement: 2026-09-27 — writes .seqnums. On failure <see cref="_seqNumsOnDisk"/> is left as it was: the caller
     /// keeps the record pending, and no new shadow is written until that pending write succeeds,
     /// so the stale value is never used.
     /// </summary>
@@ -540,28 +549,29 @@ public class FileStore : IMessageStore
     }
 
     /// <summary>
-    /// A record .seqnums must hold but may not: one whose write failed with the process alive,
+    /// FP Enhancement: 2026-09-27 — a record .seqnums must hold but may not: one whose write failed with the process alive,
     /// or one load recovered from the shadow. Open() or the next SetSeqNum writes it first,
     /// while the shadow still witnesses it.
     /// </summary>
     private string? _seqNumsPending;
 
     /// <summary>
-    /// Test-only fault seam: invoked after the shadow write and before the .seqnums write.
+    /// FP Enhancement: 2026-09-27 — test-only fault seam: invoked after the shadow write and before the .seqnums write.
     /// Throwing from it models the process dying inside the update.
     /// </summary>
     internal Action? AfterSeqNumsShadowWrite { get; set; }
 
     /// <summary>
-    /// Test-only fault seam: wraps the .seqnums.shadow stream when it is opened, so a test can
+    /// FP Enhancement: 2026-09-27 — test-only fault seam: wraps the .seqnums.shadow stream when it is opened, so a test can
     /// make a shadow write land partially and then fail.
     /// </summary>
     internal Func<System.IO.Stream, System.IO.Stream>? SeqNumsShadowStreamDecorator { get; set; }
 
 
-    /// <summary>The .seqnums bytes currently on disk, as far as this store knows.</summary>
+    /// <summary>FP Enhancement: 2026-09-27 — the .seqnums bytes currently on disk, as far as this store knows.</summary>
     private string _seqNumsOnDisk = "";
 
+    /// <summary>FP Enhancement: 2026-09-27 — overwrite a one-record file (.seqnums, its shadow).</summary>
     private static void WriteRecord(System.IO.Stream fs, string record)
     {
         byte[] bytes = Encoding.UTF8.GetBytes(record);
@@ -572,7 +582,7 @@ public class FileStore : IMessageStore
         fs.Flush();
     }
 
-    // Shadow layout: <next: fixed 45-byte upstream record><previous: 0..n bytes> <checksum>\n
+    // FP Enhancement: 2026-09-27 — shadow layout: <next: fixed 45-byte upstream record><previous: 0..n bytes> <checksum>\n
     private static readonly int SeqNumsRecordLength = (0UL.ToString("D20") + " : " + 0UL.ToString("D20") + "  ").Length;
 
     private static string SeqNumsShadowRecord(string previous, string next) =>
@@ -581,6 +591,7 @@ public class FileStore : IMessageStore
     private static string SeqNumsChecksum(string payload) =>
         Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(Encoding.UTF8.GetBytes(payload)), 0, 8);
 
+    /// <summary>FP Enhancement: 2026-09-27 — read and checksum-verify .seqnums.shadow.</summary>
     private static bool TryReadSeqNumsShadow(string path, out string previous, out string next)
     {
         previous = next = "";
@@ -604,7 +615,7 @@ public class FileStore : IMessageStore
     }
 
     /// <summary>
-    /// True when <paramref name="onDisk"/> is what an overwrite of <paramref name="previous"/>
+    /// FP Enhancement: 2026-09-27 — true when <paramref name="onDisk"/> is what an overwrite of <paramref name="previous"/>
     /// by <paramref name="next"/> leaves if interrupted after any number of bytes.
     /// </summary>
     private static bool IsInterruptedOverwrite(string onDisk, string previous, string next)
@@ -668,7 +679,7 @@ public class FileStore : IMessageStore
     }
 
     /// <summary>
-    /// The .seqnums bytes a Reset marker guards. Read through the store's own handle while it
+    /// FP Enhancement: 2026-09-27 — the .seqnums bytes a Reset marker guards. Read through the store's own handle while it
     /// is open: opening the file again by path is refused by that handle's share mode on
     /// Windows. A failed Open() can leave the handle disposed, and then nothing of ours holds
     /// the file, so it is read by path (missing means ""), keeping Reset usable from that state.
