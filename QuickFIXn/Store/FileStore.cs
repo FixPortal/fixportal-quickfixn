@@ -26,7 +26,7 @@ public class FileStore : IMessageStore
 
     private System.IO.FileStream _seqNumsFile;
     private System.IO.FileStream _msgFile;
-    private System.IO.StreamWriter _headerFile;
+    private System.IO.Stream _headerFile;
 
     private readonly MemoryStore _cache = new();
 
@@ -93,13 +93,28 @@ public class FileStore : IMessageStore
 
         _seqNumsFile = new System.IO.FileStream(_seqNumsFileName, System.IO.FileMode.OpenOrCreate, System.IO.FileAccess.ReadWrite);
         _msgFile = new System.IO.FileStream(_msgFileName, System.IO.FileMode.OpenOrCreate, System.IO.FileAccess.ReadWrite);
-        // FP Enhancement: 2026-09-27 — unbuffered header stream (same mode, access and share as
-        // StreamWriter(path, append: true)). A buffered FileStream keeps the bytes of a failed
-        // Flush and writes them on the next flush or Close, which recorded a header entry for a
-        // sequence number the session never sent and had already gap-filled.
-        _headerFile = new System.IO.StreamWriter(new System.IO.FileStream(
-            _headerFileName, System.IO.FileMode.Append, System.IO.FileAccess.Write, System.IO.FileShare.Read, bufferSize: 0));
+        _headerFile = OpenHeader();
     }
+
+    /// <summary>
+    /// FP Enhancement: 2026-09-27 — unbuffered header stream (same mode, access and share as
+    /// StreamWriter(path, append: true)). A buffered stream keeps the bytes of a failed write
+    /// and emits them on the next flush or Close, which recorded a header entry for a sequence
+    /// number the session never sent and had already gap-filled.
+    /// </summary>
+    private System.IO.Stream OpenHeader()
+    {
+        System.IO.Stream s = new System.IO.FileStream(
+            _headerFileName, System.IO.FileMode.Append, System.IO.FileAccess.Write, System.IO.FileShare.Read, bufferSize: 0);
+        return HeaderStreamDecorator?.Invoke(s) ?? s;
+    }
+
+    /// <summary>
+    /// Test-only fault seam: wraps the header stream when it is opened, so a test can make a
+    /// write land partially and then fail (a short write followed by ENOSPC), which no real
+    /// fault can produce on demand on either platform.
+    /// </summary>
+    internal Func<System.IO.Stream, System.IO.Stream>? HeaderStreamDecorator { get; set; }
 
     private void Close()
     {
@@ -110,13 +125,6 @@ public class FileStore : IMessageStore
     }
 
     private static void PurgeSingleFile(System.IO.Stream stream, string filename)
-    {
-        stream.Close();
-        if (System.IO.File.Exists(filename))
-            System.IO.File.Delete(filename);
-    }
-
-    private static void PurgeSingleFile(System.IO.StreamWriter stream, string filename)
     {
         stream.Close();
         if (System.IO.File.Exists(filename))
@@ -138,9 +146,39 @@ public class FileStore : IMessageStore
     }
 
 
+    /// <summary>
+    /// FP Enhancement: 2026-09-27 — cut a header file back to its last complete line. A crash
+    /// or a short write (ENOSPC mid-write) can leave a torn last line: cut inside its size
+    /// digits it parses as a valid, truncated entry, and the next append is glued onto it.
+    /// Every complete entry ends in '\n', so everything after the last '\n' is torn.
+    /// </summary>
+    private static void TruncateToLastCompleteLine(string path)
+    {
+        if (!System.IO.File.Exists(path))
+            return;
+
+        using System.IO.FileStream fs = new System.IO.FileStream(
+            path, System.IO.FileMode.Open, System.IO.FileAccess.ReadWrite, System.IO.FileShare.Read);
+        // ponytail: byte-wise backward scan; a torn tail is at most one ~53-byte line. A file with
+        // no '\n' at all is scanned once, then emptied.
+        long keep = fs.Length;
+        Span<byte> one = stackalloc byte[1];
+        while (keep > 0)
+        {
+            fs.Position = keep - 1;
+            fs.ReadExactly(one);
+            if (one[0] == (byte)'\n')
+                break;
+            keep--;
+        }
+        if (keep < fs.Length)
+            fs.SetLength(keep);
+    }
+
     private void ConstructFromFileCache()
     {
         _offsets.Clear();
+        TruncateToLastCompleteLine(_headerFileName);
         if (System.IO.File.Exists(_headerFileName))
         {
             // FP Enhancement: 2026-09-26 — skip a header entry whose body bytes are not all on disk
@@ -285,9 +323,27 @@ public class FileStore : IMessageStore
     private void AppendHeader(SeqNumType msgSeqNum, MsgDef def)
     {
         using PooledStringBuilder pooledSb = new PooledStringBuilder();
-        StringBuilder b = pooledSb.Builder.Append(msgSeqNum).Append(',').Append(def.Index).Append(',').Append(def.Size);
-        _headerFile.WriteLine(b.ToString());
-        _headerFile.Flush();
+        StringBuilder b = pooledSb.Builder.Append(msgSeqNum).Append(',').Append(def.Index).Append(',').Append(def.Size)
+            .Append(Environment.NewLine);
+        byte[] line = Encoding.ASCII.GetBytes(b.ToString());
+        try
+        {
+            _headerFile.Write(line, 0, line.Length);
+            _headerFile.Flush();
+        }
+        catch
+        {
+            // FP Enhancement: 2026-09-27 — a failed write may have landed partially (a short
+            // write, then ENOSPC). Cut the header back to its last complete line and reopen, so
+            // the next append starts on a line boundary instead of being glued onto a torn
+            // prefix. If the repair itself fails the header stays closed and every later write
+            // throws: the session stops persisting, and therefore stops sending, rather than
+            // writing onto a torn line. The next Open() repeats the repair.
+            _headerFile.Dispose();
+            TruncateToLastCompleteLine(_headerFileName);
+            _headerFile = OpenHeader();
+            throw;
+        }
         _offsets[msgSeqNum] = def;
         AfterDurableWrite?.Invoke();
     }

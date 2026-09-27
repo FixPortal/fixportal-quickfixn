@@ -323,6 +323,7 @@ public class FileStoreTests
     /// </summary>
     [Test]
     [Platform("Win")]
+    [System.Runtime.Versioning.SupportedOSPlatform("windows")]
     public void Failed_header_write_does_not_reach_disk_later()
     {
         IMessageStore store = _store!;
@@ -341,5 +342,88 @@ public class FileStoreTests
         var msgs = new List<string>();
         _store!.Get(1, 2, msgs);
         Assert.That(msgs, Is.EqualTo(new List<string> { "first" }));
+    }
+
+    /// <summary>
+    /// C1 (PR #98 composition review, Q5 residue): a crash or short write can leave a torn
+    /// last header line. Cut inside its size digits it would parse as a valid, truncated entry,
+    /// and the next append would be glued onto it, losing that entry after the next restart.
+    /// Load must drop the torn tail so the file ends on a line boundary.
+    /// </summary>
+    [Test]
+    public void Torn_trailing_header_line_is_dropped_on_load()
+    {
+        IMessageStore store = _store!;
+        store.SetAndIncrNextSenderMsgSeqNum(1, "first");
+        store.SetAndIncrNextSenderMsgSeqNum(2, "second");
+        _store!.Dispose();
+
+        string headerPath = Path.Combine(_storeDirectory, FileStore.Prefix(_sessionId) + ".header");
+        File.AppendAllText(headerPath, "3,0,1");
+
+        _store = (FileStore)_factory!.Create(_sessionId);
+        _store.SetAndIncrNextSenderMsgSeqNum(3, "third");
+        RebuildStore();
+
+        var msgs = new List<string>();
+        _store!.Get(1, 3, msgs);
+        Assert.That(msgs, Is.EqualTo(new List<string> { "first", "second", "third" }));
+    }
+
+    /// <summary>Writes only the first few bytes of an armed write, then fails: a short write
+    /// followed by ENOSPC.</summary>
+    private sealed class ShortWriteStream(Stream inner, Func<bool> armed) : Stream
+    {
+        public override void Write(byte[] buffer, int offset, int count)
+        {
+            if (!armed())
+            {
+                inner.Write(buffer, offset, count);
+                return;
+            }
+            inner.Write(buffer, offset, Math.Min(3, count));
+            inner.Flush();
+            throw new IOException("simulated short write (ENOSPC)");
+        }
+
+        public override void Flush() => inner.Flush();
+        protected override void Dispose(bool disposing) { if (disposing) inner.Dispose(); base.Dispose(disposing); }
+        public override bool CanRead => false;
+        public override bool CanSeek => false;
+        public override bool CanWrite => true;
+        public override long Length => inner.Length;
+        public override long Position { get => inner.Position; set => throw new NotSupportedException(); }
+        public override int Read(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+        public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+        public override void SetLength(long value) => throw new NotSupportedException();
+    }
+
+    /// <summary>
+    /// C1 (PR #98 composition review, Q5 residue): a header write that lands partially and
+    /// then fails, with the process still running, must not leave a torn prefix for the next
+    /// append to be glued onto. The failed number stays unrecorded and the next message survives
+    /// a restart.
+    /// </summary>
+    [Test]
+    public void Short_header_write_leaves_no_torn_line_for_the_next_append()
+    {
+        IMessageStore store = _store!;
+        store.SetAndIncrNextSenderMsgSeqNum(1, "first");
+
+        bool armed = false;
+        _store!.HeaderStreamDecorator = s => new ShortWriteStream(s, () => armed);
+        store.Refresh();
+
+        armed = true;
+        Assert.Throws<IOException>(() => store.SetAndIncrNextSenderMsgSeqNum(2, "second"));
+        armed = false;
+        store.SetAndIncrNextSenderMsgSeqNum(3, "third");
+
+        _store.HeaderStreamDecorator = null;
+        RebuildStore();
+
+        var msgs = new List<string>();
+        _store!.Get(1, 3, msgs);
+        Assert.That(msgs, Is.EqualTo(new List<string> { "first", "third" }));
     }
 }
