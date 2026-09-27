@@ -128,10 +128,19 @@ public class FileStore : IMessageStore
     {
         System.IO.FileStream fs = new System.IO.FileStream(
             _headerFileName, System.IO.FileMode.Append, System.IO.FileAccess.Write, System.IO.FileShare.Read, bufferSize: 0);
-        // Only ever opened on a line boundary: after the load truncation in Open(), or after
-        // the repair in AppendHeader.
-        _headerCleanLength = fs.Length;
-        return HeaderStreamDecorator?.Invoke(fs) ?? fs;
+        try
+        {
+            // Only ever opened on a line boundary: after the load truncation in Open(), or after
+            // the repair in AppendHeader.
+            _headerCleanLength = fs.Length;
+            return HeaderStreamDecorator?.Invoke(fs) ?? fs;
+        }
+        catch
+        {
+            // A leaked write handle would refuse the next repair's open on Windows.
+            fs.Dispose();
+            throw;
+        }
     }
 
     /// <summary>
@@ -142,7 +151,8 @@ public class FileStore : IMessageStore
 
     private static void TruncateTo(string path, long length)
     {
-        // Missing after a Reset() whose OpenHeader failed: nothing to cut, and OpenHeader recreates it.
+        // Missing after a Reset() whose OpenHeader failed, or unlinked externally (possible on
+        // Linux while open): nothing to cut, and OpenHeader recreates it.
         if (!System.IO.File.Exists(path))
             return;
 
