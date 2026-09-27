@@ -20,11 +20,13 @@ public class FileStore : IMessageStore
     }
 
     private readonly string _seqNumsFileName;
+    private readonly string _seqNumsShadowFileName;
     private readonly string _msgFileName;
     private readonly string _headerFileName;
     private readonly string _sessionFileName;
 
     private System.IO.FileStream _seqNumsFile;
+    private System.IO.FileStream _seqNumsShadowFile;
     private System.IO.FileStream _msgFile;
     private System.IO.Stream _headerFile;
 
@@ -72,6 +74,7 @@ public class FileStore : IMessageStore
         string prefix = Prefix(sessionId);
 
         _seqNumsFileName = System.IO.Path.Combine(normalizedPath, prefix + ".seqnums");
+        _seqNumsShadowFileName = _seqNumsFileName + ".shadow";
         _msgFileName = System.IO.Path.Combine(normalizedPath, prefix + ".body");
         _headerFileName = System.IO.Path.Combine(normalizedPath, prefix + ".header");
         _sessionFileName = System.IO.Path.Combine(normalizedPath, prefix + ".session");
@@ -79,6 +82,7 @@ public class FileStore : IMessageStore
         // The compiler isn't smart enough to see that Open() initializes these 3 vars,
         // but we can use "= null!" to make it accept that these are non-null
         _seqNumsFile = null!;
+        _seqNumsShadowFile = null!;
         _msgFile = null!;
         _headerFile = null!;
         Open();
@@ -91,7 +95,12 @@ public class FileStore : IMessageStore
         ConstructFromFileCache();
         InitializeSessionCreateTime();
 
-        _seqNumsFile = new System.IO.FileStream(_seqNumsFileName, System.IO.FileMode.OpenOrCreate, System.IO.FileAccess.ReadWrite);
+        // FP Enhancement: 2026-09-27 — unbuffered, like the header: a buffered stream keeps the
+        // bytes of a failed write and emits them later.
+        _seqNumsFile = new System.IO.FileStream(_seqNumsFileName, System.IO.FileMode.OpenOrCreate,
+            System.IO.FileAccess.ReadWrite, System.IO.FileShare.Read, bufferSize: 0);
+        _seqNumsShadowFile = new System.IO.FileStream(_seqNumsShadowFileName, System.IO.FileMode.OpenOrCreate,
+            System.IO.FileAccess.ReadWrite, System.IO.FileShare.Read, bufferSize: 0);
         _msgFile = new System.IO.FileStream(_msgFileName, System.IO.FileMode.OpenOrCreate, System.IO.FileAccess.ReadWrite);
         _headerFile = OpenHeader();
     }
@@ -141,6 +150,7 @@ public class FileStore : IMessageStore
     {
         // these vars will be null only during construction (ctor()->Open()->Close())
         _seqNumsFile?.Dispose();
+        _seqNumsShadowFile?.Dispose();
         _msgFile?.Dispose();
         _headerFile?.Dispose();
     }
@@ -161,6 +171,7 @@ public class FileStore : IMessageStore
     private void PurgeFileCache()
     {
         PurgeSingleFile(_seqNumsFile, _seqNumsFileName);
+        PurgeSingleFile(_seqNumsShadowFile, _seqNumsShadowFileName);
         PurgeSingleFile(_msgFile, _msgFileName);
         PurgeSingleFile(_headerFile, _headerFileName);
         PurgeSingleFile(_sessionFileName);
@@ -227,15 +238,28 @@ public class FileStore : IMessageStore
 
         if (System.IO.File.Exists(_seqNumsFileName))
         {
-            using (System.IO.StreamReader seqNumReader = new System.IO.StreamReader(_seqNumsFileName))
+            string onDisk = System.IO.File.ReadAllText(_seqNumsFileName);
+            _seqNumsOnDisk = onDisk;
+
+            string record = onDisk;
+            if (TryReadSeqNumsShadow(_seqNumsShadowFileName, out string previous, out string next)
+                && IsInterruptedOverwrite(onDisk, previous, next))
             {
-                string[] parts = seqNumReader.ReadToEnd().Split(':');
-                if (parts.Length == 2)
-                {
-                    _cache.NextSenderMsgSeqNum = Convert.ToUInt64(parts[0]);
-                    _cache.NextTargetMsgSeqNum = Convert.ToUInt64(parts[1]);
-                }
+                record = next;
             }
+
+            string[] parts = record.Split(':');
+            if (parts.Length == 2)
+            {
+                _cache.NextSenderMsgSeqNum = Convert.ToUInt64(parts[0]);
+                _cache.NextTargetMsgSeqNum = Convert.ToUInt64(parts[1]);
+            }
+        }
+        else
+        {
+            // Missing (a fresh store, or a Reset interrupted between its deletes): any shadow
+            // left behind is stale.
+            _seqNumsOnDisk = "";
         }
     }
 
@@ -408,14 +432,105 @@ public class FileStore : IMessageStore
         SetSeqNum();
     }
 
+    /// <summary>
+    /// FP Enhancement: 2026-09-27 — .seqnums is one record overwritten in place. A partial
+    /// overwrite leaves the new record's leading bytes in front of the old one's trailing bytes
+    /// (sender 99 -> 100 torn to 199); the record still parses, so a torn sender number forces
+    /// a gap fill and a torn target number a Logout loop. Each update therefore first writes
+    /// .seqnums.shadow: the record about to be written, the bytes it is about to overwrite, and
+    /// a checksum over both. Then it writes the unchanged upstream record.
+    /// On load, the shadow's record is used only when .seqnums is exactly an interruption of
+    /// that overwrite: some leading bytes of the new record followed by the rest of the old
+    /// bytes (this includes the untouched old record and the completed new one). Anything else
+    /// means another writer rewrote .seqnums (an engine that predates the shadow, an operator's
+    /// deliberate edit), and .seqnums wins as upstream reads it. A torn shadow fails its
+    /// checksum, which means the interruption came before .seqnums was touched.
+    /// </summary>
     private void SetSeqNum()
     {
-        _seqNumsFile.Seek(0, System.IO.SeekOrigin.Begin);
-        using (System.IO.StreamWriter writer = new System.IO.StreamWriter(_seqNumsFile, leaveOpen: true))
+        string next = NextSenderMsgSeqNum.ToString("D20") + " : " + NextTargetMsgSeqNum.ToString("D20") + "  ";
+        WriteRecord(_seqNumsShadowFile, SeqNumsShadowRecord(_seqNumsOnDisk, next));
+        try
         {
-            writer.Write(NextSenderMsgSeqNum.ToString("D20") + " : " + NextTargetMsgSeqNum.ToString("D20") + "  ");
+            WriteRecord(_seqNumsFile, next);
         }
+        catch
+        {
+            // Whatever landed is now what the next shadow must describe as "about to overwrite".
+            _seqNumsOnDisk = ReadAllTextOrEmpty(_seqNumsFileName);
+            throw;
+        }
+        _seqNumsOnDisk = next;
         AfterDurableWrite?.Invoke();
+    }
+
+    /// <summary>The .seqnums bytes currently on disk, as far as this store knows.</summary>
+    private string _seqNumsOnDisk = "";
+
+    private static string ReadAllTextOrEmpty(string path)
+    {
+        try
+        {
+            return System.IO.File.Exists(path) ? System.IO.File.ReadAllText(path) : "";
+        }
+        catch (System.IO.IOException)
+        {
+            return "";
+        }
+    }
+
+    private static void WriteRecord(System.IO.FileStream fs, string record)
+    {
+        byte[] bytes = Encoding.UTF8.GetBytes(record);
+        fs.Seek(0, System.IO.SeekOrigin.Begin);
+        fs.Write(bytes, 0, bytes.Length);
+        if (fs.Length > bytes.Length)
+            fs.SetLength(bytes.Length);
+        fs.Flush();
+    }
+
+    // Shadow layout: <next: fixed 45-byte upstream record><previous: 0..n bytes> <checksum>\n
+    private static readonly int SeqNumsRecordLength = (0UL.ToString("D20") + " : " + 0UL.ToString("D20") + "  ").Length;
+
+    private static string SeqNumsShadowRecord(string previous, string next) =>
+        next + previous + " " + SeqNumsChecksum(next + previous) + "\n";
+
+    private static string SeqNumsChecksum(string payload) =>
+        Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(Encoding.UTF8.GetBytes(payload)), 0, 8);
+
+    private static bool TryReadSeqNumsShadow(string path, out string previous, out string next)
+    {
+        previous = next = "";
+        if (!System.IO.File.Exists(path))
+            return false;
+
+        string shadow = System.IO.File.ReadAllText(path);
+        const int trailer = 1 + 16 + 1; // " " + checksum + "\n"
+        if (shadow.Length < SeqNumsRecordLength + trailer
+            || !shadow.EndsWith('\n')
+            || shadow[shadow.Length - trailer] != ' ')
+            return false;
+
+        string payload = shadow.Substring(0, shadow.Length - trailer);
+        if (SeqNumsChecksum(payload) != shadow.Substring(shadow.Length - trailer + 1, 16))
+            return false;
+
+        next = payload.Substring(0, SeqNumsRecordLength);
+        previous = payload.Substring(SeqNumsRecordLength);
+        return true;
+    }
+
+    /// <summary>
+    /// True when <paramref name="onDisk"/> is what an overwrite of <paramref name="previous"/>
+    /// by <paramref name="next"/> leaves if interrupted after any number of bytes.
+    /// </summary>
+    private static bool IsInterruptedOverwrite(string onDisk, string previous, string next)
+    {
+        int k = 0;
+        while (k < onDisk.Length && k < next.Length && onDisk[k] == next[k])
+            k++;
+        string rest = k < previous.Length ? previous.Substring(k) : "";
+        return onDisk == next.Substring(0, k) + rest;
     }
 
     public DateTime? CreationTime => _cache.CreationTime;
