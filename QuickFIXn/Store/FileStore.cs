@@ -680,7 +680,12 @@ public class FileStore : IMessageStore
             byte[] bytes = new byte[_seqNumsFile.Length];
             _seqNumsFile.Seek(0, System.IO.SeekOrigin.Begin);
             _seqNumsFile.ReadExactly(bytes);
-            return Encoding.UTF8.GetString(bytes);
+            // Decode exactly as File.ReadAllText (the completion check) does: UTF-8 by
+            // default, with byte-order-mark detection, so a file an editor saved as UTF-16
+            // or with a UTF-8 BOM yields the same text on both sides.
+            using System.IO.StreamReader reader = new System.IO.StreamReader(
+                new System.IO.MemoryStream(bytes), Encoding.UTF8, detectEncodingFromByteOrderMarks: true);
+            return reader.ReadToEnd();
         }
         catch (ObjectDisposedException)
         {

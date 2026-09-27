@@ -798,6 +798,31 @@ public class FileStoreTests
     }
 
     /// <summary>
+    /// As above for an editor that saved .seqnums as UTF-16 with a byte-order mark: the marker
+    /// must decode the bytes exactly as the completion check does (File.ReadAllText detects
+    /// the BOM), or an interrupted Reset would be discarded. Windows only, as above.
+    /// </summary>
+    [Test]
+    [Platform("Win")]
+    public void Interrupted_reset_completes_when_seqnums_is_utf16()
+    {
+        IMessageStore store = _store!;
+        store.SetAndIncrNextSenderMsgSeqNum(1, "first");
+        _store!.Dispose();
+        File.WriteAllText(SeqNumsPath, File.ReadAllText(SeqNumsPath), System.Text.Encoding.Unicode);
+        _store = (FileStore)_factory!.Create(_sessionId);
+
+        using (new FileStream(ShadowPath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite))
+            Assert.Catch<IOException>(() => _store.Reset());
+        _store.Dispose();
+
+        _store = (FileStore)_factory!.Create(_sessionId);
+        var msgs = new List<string>();
+        _store.Get(1, 1, msgs);
+        Assert.That(msgs, Is.Empty);
+    }
+
+    /// <summary>
     /// A Refresh that fails after closing the streams (here a directory where .session should
     /// be makes the reload throw before any stream reopens) leaves them disposed. Reset must
     /// still work from that state, as upstream's did: its marker cannot depend on a live
