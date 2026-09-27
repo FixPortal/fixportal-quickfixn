@@ -93,7 +93,12 @@ public class FileStore : IMessageStore
 
         _seqNumsFile = new System.IO.FileStream(_seqNumsFileName, System.IO.FileMode.OpenOrCreate, System.IO.FileAccess.ReadWrite);
         _msgFile = new System.IO.FileStream(_msgFileName, System.IO.FileMode.OpenOrCreate, System.IO.FileAccess.ReadWrite);
-        _headerFile = new System.IO.StreamWriter(_headerFileName, true);
+        // FP Enhancement: 2026-09-27 — unbuffered header stream (same mode, access and share as
+        // StreamWriter(path, append: true)). A buffered FileStream keeps the bytes of a failed
+        // Flush and writes them on the next flush or Close, which recorded a header entry for a
+        // sequence number the session never sent and had already gap-filled.
+        _headerFile = new System.IO.StreamWriter(new System.IO.FileStream(
+            _headerFileName, System.IO.FileMode.Append, System.IO.FileAccess.Write, System.IO.FileShare.Read, bufferSize: 0));
     }
 
     private void Close()

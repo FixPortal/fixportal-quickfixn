@@ -312,4 +312,34 @@ public class FileStoreTests
 
         Assert.That(_store!.NextSenderMsgSeqNum, Is.EqualTo(2));
     }
+
+    /// <summary>
+    /// C1 (composition review Q5): a header write that fails while the process lives must
+    /// not reach disk later. The session never sent that number and gap-fills it; if the
+    /// failed line surfaced on a later flush or close, a resend after restart would replay
+    /// the unsent message as PossDup.
+    /// The fault is a real OS byte-range lock on the header file, which only blocks another
+    /// handle's writes on Windows (advisory on Linux), so this runs on Windows only.
+    /// </summary>
+    [Test]
+    [Platform("Win")]
+    public void Failed_header_write_does_not_reach_disk_later()
+    {
+        IMessageStore store = _store!;
+        store.SetAndIncrNextSenderMsgSeqNum(1, "first");
+
+        string headerPath = Path.Combine(_storeDirectory, FileStore.Prefix(_sessionId) + ".header");
+        using (var locker = new FileStream(headerPath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite))
+        {
+            locker.Lock(0, 1_000_000);
+            Assert.Throws<IOException>(() => store.SetAndIncrNextSenderMsgSeqNum(2, "second"));
+            locker.Unlock(0, 1_000_000);
+        }
+
+        RebuildStore();
+
+        var msgs = new List<string>();
+        _store!.Get(1, 2, msgs);
+        Assert.That(msgs, Is.EqualTo(new List<string> { "first" }));
+    }
 }
