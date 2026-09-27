@@ -498,4 +498,40 @@ public class FileStoreTests
         _store!.Get(1, 4, msgs);
         Assert.That(msgs, Is.EqualTo(new List<string> { "first", "fourth" }));
     }
+
+    /// <summary>
+    /// C1: Reset() deletes the header; if reopening it then fails before the file is created,
+    /// the next write's repair must recreate it rather than fail on the missing file forever.
+    /// </summary>
+    [Test]
+    public void Header_repair_recovers_when_reset_left_no_header_file()
+    {
+        IMessageStore store = _store!;
+        store.SetAndIncrNextSenderMsgSeqNum(1, "first");
+
+        string headerPath = Path.Combine(_storeDirectory, FileStore.Prefix(_sessionId) + ".header");
+        bool failOpen = false;
+        _store!.HeaderStreamDecorator = s =>
+        {
+            if (!failOpen)
+                return s;
+            s.Dispose();
+            File.Delete(headerPath); // the open failed before the file existed
+            throw new IOException("simulated header open failure");
+        };
+
+        failOpen = true;
+        Assert.Throws<IOException>(() => store.Reset());
+        failOpen = false;
+
+        Assert.Catch<Exception>(() => store.SetAndIncrNextSenderMsgSeqNum(1, "a"));
+        store.SetAndIncrNextSenderMsgSeqNum(2, "b");
+
+        _store.HeaderStreamDecorator = null;
+        RebuildStore();
+
+        var msgs = new List<string>();
+        _store!.Get(1, 2, msgs);
+        Assert.That(msgs, Is.EqualTo(new List<string> { "b" }));
+    }
 }
