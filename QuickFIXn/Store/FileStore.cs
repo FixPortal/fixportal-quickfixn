@@ -103,6 +103,12 @@ public class FileStore : IMessageStore
             System.IO.FileAccess.ReadWrite, System.IO.FileShare.Read, bufferSize: 0);
         _msgFile = new System.IO.FileStream(_msgFileName, System.IO.FileMode.OpenOrCreate, System.IO.FileAccess.ReadWrite);
         _headerFile = OpenHeader();
+
+        if (_seqNumsRecovered)
+        {
+            _seqNumsRecovered = false;
+            SetSeqNum();
+        }
     }
 
     /// <summary>
@@ -246,6 +252,9 @@ public class FileStore : IMessageStore
                 && IsInterruptedOverwrite(onDisk, previous, next))
             {
                 record = next;
+                // Rewrite .seqnums as soon as the streams are open, so the torn record does not
+                // outlive the shadow that is its only witness.
+                _seqNumsRecovered = onDisk != next;
             }
 
             string[] parts = record.Split(':');
@@ -450,6 +459,7 @@ public class FileStore : IMessageStore
     {
         string next = NextSenderMsgSeqNum.ToString("D20") + " : " + NextTargetMsgSeqNum.ToString("D20") + "  ";
         WriteRecord(_seqNumsShadowFile, SeqNumsShadowRecord(_seqNumsOnDisk, next));
+        AfterSeqNumsShadowWrite?.Invoke();
         try
         {
             WriteRecord(_seqNumsFile, next);
@@ -457,21 +467,39 @@ public class FileStore : IMessageStore
         catch
         {
             // Whatever landed is now what the next shadow must describe as "about to overwrite".
-            _seqNumsOnDisk = ReadAllTextOrEmpty(_seqNumsFileName);
+            // Read it back through our own handle: a second handle would be refused by our own
+            // share mode.
+            _seqNumsOnDisk = ReadBackOrEmpty(_seqNumsFile);
             throw;
         }
         _seqNumsOnDisk = next;
+        // The update completed, so retire the shadow. A shadow left in place would later
+        // override a deliberate edit that happens to have the shape of a torn overwrite; with
+        // it retired, a valid shadow at load means the process died inside this method.
+        _seqNumsShadowFile.SetLength(0);
         AfterDurableWrite?.Invoke();
     }
+
+    /// <summary>
+    /// Test-only fault seam: invoked after the shadow write and before the .seqnums write.
+    /// Throwing from it models the process dying inside the update.
+    /// </summary>
+    internal Action? AfterSeqNumsShadowWrite { get; set; }
+
+    /// <summary>Set at load when the shadow's record replaced a torn .seqnums.</summary>
+    private bool _seqNumsRecovered;
 
     /// <summary>The .seqnums bytes currently on disk, as far as this store knows.</summary>
     private string _seqNumsOnDisk = "";
 
-    private static string ReadAllTextOrEmpty(string path)
+    private static string ReadBackOrEmpty(System.IO.FileStream fs)
     {
         try
         {
-            return System.IO.File.Exists(path) ? System.IO.File.ReadAllText(path) : "";
+            byte[] bytes = new byte[fs.Length];
+            fs.Seek(0, System.IO.SeekOrigin.Begin);
+            fs.ReadExactly(bytes);
+            return Encoding.UTF8.GetString(bytes);
         }
         catch (System.IO.IOException)
         {

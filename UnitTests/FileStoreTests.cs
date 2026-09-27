@@ -543,17 +543,29 @@ public class FileStoreTests
     /// of the old value's trailing ones (99 -> 100 torn to 199). The record still parses, so it
     /// must be recovered from the checksummed shadow rather than loaded.
     /// </summary>
+    private sealed class SimulatedSeqNumsCrash : Exception;
+
+    private static string SeqNumsRecord(ulong sender, ulong target) =>
+        sender.ToString("D20") + " : " + target.ToString("D20") + "  ";
+
+    /// <summary>Update the sender number and "die" after the shadow write, before .seqnums.</summary>
+    private void CrashInsideSeqNumsUpdate(ulong sender)
+    {
+        _store!.AfterSeqNumsShadowWrite = () => throw new SimulatedSeqNumsCrash();
+        Assert.Throws<SimulatedSeqNumsCrash>(() => _store.NextSenderMsgSeqNum = sender);
+        _store.AfterSeqNumsShadowWrite = null;
+        _store.Dispose();
+    }
+
     [Test]
     public void Torn_seqnums_record_is_recovered_from_the_shadow()
     {
         _store!.NextTargetMsgSeqNum = 50;
         _store.NextSenderMsgSeqNum = 99;
-        _store.NextSenderMsgSeqNum = 100;
-        _store.Dispose();
+        CrashInsideSeqNumsUpdate(100);
 
         // The 99 -> 100 overwrite torn after 18 bytes: new leading digits, old trailing ones.
-        File.WriteAllText(SeqNumsPath,
-            199UL.ToString("D20") + " : " + 50UL.ToString("D20") + "  ");
+        File.WriteAllText(SeqNumsPath, SeqNumsRecord(199, 50));
 
         _store = (FileStore)_factory!.Create(_sessionId);
         Assert.That(_store.NextSenderMsgSeqNum, Is.EqualTo(100));
@@ -561,19 +573,37 @@ public class FileStoreTests
     }
 
     /// <summary>
-    /// .seqnums rewritten by someone other than this store (an engine that predates the
-    /// shadow, or an operator's deliberate edit) must win over a stale shadow; otherwise
-    /// sequence numbers the other writer already used would be reused.
+    /// When the shadow is used at load, .seqnums is rewritten at once. Otherwise an
+    /// interruption of the next shadow write would lose the only witness and the torn record
+    /// would load.
     /// </summary>
     [Test]
-    public void Seqnums_written_by_another_writer_wins_over_a_stale_shadow()
+    public void Recovery_from_the_shadow_rewrites_seqnums()
+    {
+        _store!.NextTargetMsgSeqNum = 50;
+        _store.NextSenderMsgSeqNum = 99;
+        CrashInsideSeqNumsUpdate(100);
+        File.WriteAllText(SeqNumsPath, SeqNumsRecord(199, 50));
+
+        _store = (FileStore)_factory!.Create(_sessionId);
+        _store.Dispose();
+
+        Assert.That(File.ReadAllText(SeqNumsPath), Is.EqualTo(SeqNumsRecord(100, 50)));
+    }
+
+    /// <summary>
+    /// .seqnums rewritten by someone other than this store (an engine that predates the
+    /// shadow, or an operator's deliberate edit) must win; otherwise sequence numbers the
+    /// other writer already used would be reused.
+    /// </summary>
+    [Test]
+    public void Seqnums_written_by_another_writer_wins()
     {
         _store!.NextSenderMsgSeqNum = 100;
         _store.NextTargetMsgSeqNum = 50;
         _store.Dispose();
 
-        File.WriteAllText(SeqNumsPath,
-            150UL.ToString("D20") + " : " + 60UL.ToString("D20") + "  ");
+        File.WriteAllText(SeqNumsPath, SeqNumsRecord(150, 60));
 
         _store = (FileStore)_factory!.Create(_sessionId);
         Assert.That(_store.NextSenderMsgSeqNum, Is.EqualTo(150));
@@ -581,20 +611,36 @@ public class FileStoreTests
     }
 
     /// <summary>
-    /// A torn shadow means the crash came while it was being written, before .seqnums was
-    /// touched, so .seqnums still holds the previous complete record.
+    /// An edit made after a completed update can have exactly the shape of a torn overwrite
+    /// (99 -> 100 completed, then 199 written by hand). Content alone cannot tell them apart,
+    /// so no shadow may survive a completed update.
+    /// </summary>
+    [Test]
+    public void Edit_shaped_like_a_torn_overwrite_wins_after_a_completed_update()
+    {
+        _store!.NextTargetMsgSeqNum = 50;
+        _store.NextSenderMsgSeqNum = 99;
+        _store.NextSenderMsgSeqNum = 100;
+        _store.Dispose();
+
+        File.WriteAllText(SeqNumsPath, SeqNumsRecord(199, 50));
+
+        _store = (FileStore)_factory!.Create(_sessionId);
+        Assert.That(_store.NextSenderMsgSeqNum, Is.EqualTo(199));
+    }
+
+    /// <summary>
+    /// A torn shadow means the interruption came while it was being written, before .seqnums
+    /// was touched, so .seqnums still holds the previous complete record.
     /// </summary>
     [Test]
     public void Torn_shadow_falls_back_to_the_seqnums_record()
     {
         _store!.NextTargetMsgSeqNum = 50;
-        _store.NextSenderMsgSeqNum = 100;
-        _store.Dispose();
+        CrashInsideSeqNumsUpdate(100);
 
-        // Interrupted while writing the shadow for 1/50 -> 100/50: .seqnums still holds 1/50,
-        // and the shadow's new record is torn to 109, which would otherwise pass as a partial
+        // The shadow's new record torn to 109, which would otherwise pass as a partial
         // overwrite of 1/50. Only the checksum can reject it.
-        File.WriteAllText(SeqNumsPath, 1UL.ToString("D20") + " : " + 50UL.ToString("D20") + "  ");
         string shadow = File.ReadAllText(ShadowPath);
         File.WriteAllText(ShadowPath, shadow.Substring(0, 19) + "9" + shadow.Substring(20));
 
