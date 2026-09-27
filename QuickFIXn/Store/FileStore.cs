@@ -104,9 +104,26 @@ public class FileStore : IMessageStore
     /// </summary>
     private System.IO.Stream OpenHeader()
     {
-        System.IO.Stream s = new System.IO.FileStream(
+        System.IO.FileStream fs = new System.IO.FileStream(
             _headerFileName, System.IO.FileMode.Append, System.IO.FileAccess.Write, System.IO.FileShare.Read, bufferSize: 0);
-        return HeaderStreamDecorator?.Invoke(s) ?? s;
+        // Only ever opened on a line boundary: after the load truncation in Open(), or after
+        // the repair in AppendHeader.
+        _headerCleanLength = fs.Length;
+        return HeaderStreamDecorator?.Invoke(fs) ?? fs;
+    }
+
+    /// <summary>
+    /// FP Enhancement: 2026-09-27 — length of the header file up to its last entry known to be
+    /// complete and deliberately written. A failed header write is cut back to this length.
+    /// </summary>
+    private long _headerCleanLength;
+
+    private static void TruncateTo(string path, long length)
+    {
+        using System.IO.FileStream fs = new System.IO.FileStream(
+            path, System.IO.FileMode.Open, System.IO.FileAccess.Write, System.IO.FileShare.Read);
+        if (fs.Length > length)
+            fs.SetLength(length);
     }
 
     /// <summary>
@@ -331,19 +348,30 @@ public class FileStore : IMessageStore
             _headerFile.Write(line, 0, line.Length);
             _headerFile.Flush();
         }
-        catch
+        catch (Exception writeFailure)
         {
             // FP Enhancement: 2026-09-27 — a failed write may have landed partially (a short
-            // write, then ENOSPC). Cut the header back to its last complete line and reopen, so
-            // the next append starts on a line boundary instead of being glued onto a torn
-            // prefix. If the repair itself fails the header stays closed and every later write
-            // throws: the session stops persisting, and therefore stops sending, rather than
-            // writing onto a torn line. The next Open() repeats the repair.
-            _headerFile.Dispose();
-            TruncateToLastCompleteLine(_headerFileName);
-            _headerFile = OpenHeader();
+            // write, then ENOSPC) or even completely while still reporting failure. Session
+            // treats the number as unsent either way, so cut the header back to its length
+            // before this write and reopen: nothing of this entry survives, and the next append
+            // starts on a line boundary. If the repair fails, the header stream is left
+            // disposed, so this write and every later one throw (the session stops persisting,
+            // and therefore sending) and each later write retries the repair.
+            try
+            {
+                _headerFile.Dispose();
+                TruncateTo(_headerFileName, _headerCleanLength);
+                _headerFile = OpenHeader();
+            }
+            catch (Exception repairFailure)
+            {
+                throw new System.IO.IOException(
+                    "Header write failed and the header could not be cut back to its last complete entry.",
+                    new AggregateException(writeFailure, repairFailure));
+            }
             throw;
         }
+        _headerCleanLength += line.Length;
         _offsets[msgSeqNum] = def;
         AfterDurableWrite?.Invoke();
     }
