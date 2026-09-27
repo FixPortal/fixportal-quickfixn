@@ -771,6 +771,28 @@ public class FileStoreTests
     }
 
     /// <summary>
+    /// A Refresh that fails after closing the streams (here a directory where .session should
+    /// be makes the reload throw before any stream reopens) leaves them disposed. Reset must
+    /// still work from that state, as upstream's did: its marker cannot depend on a live
+    /// .seqnums stream.
+    /// </summary>
+    [Test]
+    public void Reset_recovers_a_store_left_closed_by_a_failed_refresh()
+    {
+        IMessageStore store = _store!;
+        store.SetAndIncrNextSenderMsgSeqNum(1, "first");
+
+        string sessionPath = Path.Combine(_storeDirectory, FileStore.Prefix(_sessionId) + ".session");
+        File.Delete(sessionPath);
+        Directory.CreateDirectory(sessionPath);
+        Assert.Catch<Exception>(() => store.Refresh());
+        Directory.Delete(sessionPath);
+
+        Assert.DoesNotThrow(() => store.Reset());
+        Assert.That(store.NextSenderMsgSeqNum, Is.EqualTo(1));
+    }
+
+    /// <summary>
     /// If Reset cannot record its intent (here a directory occupies the marker's path), it must
     /// fail before changing anything, in memory or on disk: a session that swallows the
     /// exception must not carry on from a reset in-memory sequence over the old store.
