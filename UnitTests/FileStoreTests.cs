@@ -619,6 +619,40 @@ public class FileStoreTests
         Assert.That(_store!.NextSenderMsgSeqNum, Is.EqualTo(100));
     }
 
+    /// <summary>
+    /// The repair a load decides on must survive an Open() that fails before writing it: the
+    /// next update still has to repair .seqnums under the old shadow before overwriting it.
+    /// </summary>
+    [Test]
+    public void Repair_survives_a_refresh_that_fails_before_writing_it()
+    {
+        _store!.NextTargetMsgSeqNum = 50;
+        _store.NextSenderMsgSeqNum = 99;
+
+        bool tearShadow = false;
+        _store.SeqNumsShadowStreamDecorator = s => new ShortWriteStream(s, () => tearShadow, landed: 50);
+        _store.Refresh();
+
+        // 99 -> 100: shadow written, then the .seqnums write fails.
+        _store.AfterSeqNumsShadowWrite = () => throw new IOException("simulated .seqnums write failure");
+        Assert.Throws<IOException>(() => _store.NextSenderMsgSeqNum = 100);
+        _store.AfterSeqNumsShadowWrite = null;
+
+        // A Refresh that fails after load, before its repair of .seqnums.
+        _store.HeaderStreamDecorator = _ => throw new IOException("simulated header open failure");
+        Assert.Throws<IOException>(() => _store.Refresh());
+        _store.HeaderStreamDecorator = null;
+
+        // Next update: its shadow write tears.
+        tearShadow = true;
+        Assert.Catch<Exception>(() => _store.NextTargetMsgSeqNum = 51);
+        tearShadow = false;
+        _store.SeqNumsShadowStreamDecorator = null;
+
+        RebuildStore();
+        Assert.That(_store!.NextSenderMsgSeqNum, Is.EqualTo(100));
+    }
+
     private string SeqNumsPath => Path.Combine(_storeDirectory, FileStore.Prefix(_sessionId) + ".seqnums");
     private string ShadowPath => SeqNumsPath + ".shadow";
 

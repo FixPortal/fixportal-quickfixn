@@ -121,14 +121,14 @@ public class FileStore : IMessageStore
         // FP Enhancement: 2026-09-27 — finish what load decided about .seqnums. A recovered
         // record is written straight into .seqnums while the shadow still stands as its witness
         // (a torn repair is again an interrupted overwrite of the same shadow). Then the shadow
-        // is retired unconditionally: once load has settled, any shadow is stale, and a stale
-        // shadow could later override a deliberate edit shaped like a torn overwrite. If the
-        // repair fails, the shadow is kept and the next load repeats it.
-        if (_seqNumsRepair is { } repair)
+        // is retired: once load has settled, any shadow is stale, and a stale shadow could later
+        // override a deliberate edit shaped like a torn overwrite. If this Open() fails before
+        // the repair lands, the record stays pending and the next SetSeqNum writes it first,
+        // still under the same shadow.
+        if (_seqNumsPending is { } pending)
         {
-            _seqNumsRepair = null;
-            WriteRecord(_seqNumsFile, repair);
-            _seqNumsOnDisk = repair;
+            WriteSeqNums(pending);
+            _seqNumsPending = null;
         }
         _seqNumsShadowFile.SetLength(0);
     }
@@ -248,8 +248,7 @@ public class FileStore : IMessageStore
     private void ConstructFromFileCache()
     {
         _offsets.Clear();
-        _seqNumsRepair = null;
-        _seqNumsPending = null; // load re-derives .seqnums from disk, shadow included
+        _seqNumsPending = null; // load re-derives it from disk, shadow included
         TruncateToLastCompleteLine(_headerFileName);
         if (System.IO.File.Exists(_headerFileName))
         {
@@ -286,8 +285,8 @@ public class FileStore : IMessageStore
                 && IsInterruptedOverwrite(onDisk, previous, next))
             {
                 record = next;
-                // Open() writes it into .seqnums before retiring the shadow.
-                _seqNumsRepair = onDisk != next ? next : null;
+                // Pending: Open() writes it into .seqnums before retiring the shadow.
+                _seqNumsPending = onDisk != next ? next : null;
             }
 
             string[] parts = record.Split(':');
@@ -518,27 +517,21 @@ public class FileStore : IMessageStore
         AfterDurableWrite?.Invoke();
     }
 
-    /// <summary>Writes .seqnums and keeps <see cref="_seqNumsOnDisk"/> true on success and failure.</summary>
+    /// <summary>
+    /// Writes .seqnums. On failure <see cref="_seqNumsOnDisk"/> is left as it was: the caller
+    /// keeps the record pending, and no new shadow is written until that pending write succeeds,
+    /// so the stale value is never used.
+    /// </summary>
     private void WriteSeqNums(string record)
     {
-        try
-        {
-            WriteRecord(_seqNumsFile, record);
-        }
-        catch
-        {
-            // Whatever landed is now what the next shadow must describe as "about to overwrite".
-            // Read it back through our own handle: a second handle would be refused by our own
-            // share mode.
-            _seqNumsOnDisk = ReadBackOrEmpty(_seqNumsFile);
-            throw;
-        }
+        WriteRecord(_seqNumsFile, record);
         _seqNumsOnDisk = record;
     }
 
     /// <summary>
-    /// The record whose .seqnums write failed with the process alive; the next SetSeqNum
-    /// writes it first, while the shadow still witnesses it.
+    /// A record .seqnums must hold but may not: one whose write failed with the process alive,
+    /// or one load recovered from the shadow. Open() or the next SetSeqNum writes it first,
+    /// while the shadow still witnesses it.
     /// </summary>
     private string? _seqNumsPending;
 
@@ -554,28 +547,9 @@ public class FileStore : IMessageStore
     /// </summary>
     internal Func<System.IO.Stream, System.IO.Stream>? SeqNumsShadowStreamDecorator { get; set; }
 
-    /// <summary>Set at load when the shadow's record replaced a torn .seqnums; Open() writes it.</summary>
-    private string? _seqNumsRepair;
 
     /// <summary>The .seqnums bytes currently on disk, as far as this store knows.</summary>
     private string _seqNumsOnDisk = "";
-
-    private static string ReadBackOrEmpty(System.IO.Stream fs)
-    {
-        try
-        {
-            byte[] bytes = new byte[fs.Length];
-            fs.Seek(0, System.IO.SeekOrigin.Begin);
-            fs.ReadExactly(bytes);
-            return Encoding.UTF8.GetString(bytes);
-        }
-        catch (Exception)
-        {
-            // Called from a catch: never replace the original write failure. "" makes the next
-            // shadow describe nothing, and load then falls back to .seqnums as upstream does.
-            return "";
-        }
-    }
 
     private static void WriteRecord(System.IO.Stream fs, string record)
     {
