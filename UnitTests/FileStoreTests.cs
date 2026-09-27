@@ -653,6 +653,26 @@ public class FileStoreTests
         Assert.That(_store!.NextSenderMsgSeqNum, Is.EqualTo(100));
     }
 
+    /// <summary>
+    /// A shadow must never outlive the .seqnums it describes: if Reset deleted .seqnums and then
+    /// failed to delete the shadow, a later load could find a recreated empty .seqnums that looks
+    /// like an interrupted first write, and the stale shadow would undo the Reset. Reset deletes
+    /// the shadow first, so a failed shadow delete leaves .seqnums untouched.
+    /// The failed delete is real: another handle holds the shadow open without delete sharing,
+    /// which refuses the delete only on Windows.
+    /// </summary>
+    [Test]
+    [Platform("Win")]
+    public void Reset_that_cannot_delete_the_shadow_leaves_seqnums_in_place()
+    {
+        _store!.NextSenderMsgSeqNum = 5;
+
+        using (new FileStream(ShadowPath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite))
+            Assert.Catch<IOException>(() => _store.Reset());
+
+        Assert.That(File.Exists(SeqNumsPath), Is.True);
+    }
+
     private string SeqNumsPath => Path.Combine(_storeDirectory, FileStore.Prefix(_sessionId) + ".seqnums");
     private string ShadowPath => SeqNumsPath + ".shadow";
 
