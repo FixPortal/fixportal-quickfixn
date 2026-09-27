@@ -535,6 +535,37 @@ public class FileStoreTests
         Assert.That(msgs, Is.EqualTo(new List<string> { "b" }));
     }
 
+    /// <summary>
+    /// C1: if opening the header fails after its FileStream exists, that handle must be
+    /// closed. A leaked write handle refuses the repair's own open (on Windows), so every
+    /// later write would fail instead of the store recovering on the next one.
+    /// </summary>
+    [Test]
+    public void Failed_header_open_does_not_leak_a_handle_that_blocks_recovery()
+    {
+        IMessageStore store = _store!;
+        store.SetAndIncrNextSenderMsgSeqNum(1, "first");
+
+        bool armed = false;
+        bool failOpen = false;
+        _store!.HeaderStreamDecorator = s =>
+        {
+            if (failOpen)
+                throw new IOException("simulated failure after the header stream was opened");
+            return new ShortWriteStream(s, () => armed);
+        };
+        store.Refresh();
+
+        armed = true;
+        failOpen = true;
+        Assert.Throws<IOException>(() => store.SetAndIncrNextSenderMsgSeqNum(2, "second"));
+        armed = false;
+        failOpen = false;
+
+        Assert.Catch<Exception>(() => store.SetAndIncrNextSenderMsgSeqNum(3, "third"));
+        Assert.DoesNotThrow(() => store.SetAndIncrNextSenderMsgSeqNum(4, "fourth"));
+    }
+
     private string SeqNumsPath => Path.Combine(_storeDirectory, FileStore.Prefix(_sessionId) + ".seqnums");
     private string ShadowPath => SeqNumsPath + ".shadow";
 
