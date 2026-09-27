@@ -208,8 +208,11 @@ public class FileStore : IMessageStore
 
     private void PurgeFileCache()
     {
-        PurgeSingleFile(_seqNumsFile, _seqNumsFileName);
+        // FP Enhancement: 2026-09-27 — shadow first, so it never outlives the .seqnums it
+        // describes: a Reset interrupted between the two leaves the old .seqnums and no shadow
+        // (as if the Reset had not started), never a stale shadow beside a recreated empty .seqnums.
         PurgeSingleFile(_seqNumsShadowFile, _seqNumsShadowFileName);
+        PurgeSingleFile(_seqNumsFile, _seqNumsFileName);
         PurgeSingleFile(_msgFile, _msgFileName);
         PurgeSingleFile(_headerFile, _headerFileName);
         PurgeSingleFile(_sessionFileName);
