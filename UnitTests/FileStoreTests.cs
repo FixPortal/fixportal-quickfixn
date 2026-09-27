@@ -389,14 +389,14 @@ public class FileStoreTests
 
         public override void Flush() => inner.Flush();
         protected override void Dispose(bool disposing) { if (disposing) inner.Dispose(); base.Dispose(disposing); }
-        public override bool CanRead => false;
-        public override bool CanSeek => false;
+        public override bool CanRead => inner.CanRead;
+        public override bool CanSeek => inner.CanSeek;
         public override bool CanWrite => true;
         public override long Length => inner.Length;
-        public override long Position { get => inner.Position; set => throw new NotSupportedException(); }
-        public override int Read(byte[] buffer, int offset, int count) => throw new NotSupportedException();
-        public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
-        public override void SetLength(long value) => throw new NotSupportedException();
+        public override long Position { get => inner.Position; set => inner.Position = value; }
+        public override int Read(byte[] buffer, int offset, int count) => inner.Read(buffer, offset, count);
+        public override long Seek(long offset, SeekOrigin origin) => inner.Seek(offset, origin);
+        public override void SetLength(long value) => inner.SetLength(value);
     }
 
     /// <summary>
@@ -564,6 +564,59 @@ public class FileStoreTests
 
         Assert.Catch<Exception>(() => store.SetAndIncrNextSenderMsgSeqNum(3, "third"));
         Assert.DoesNotThrow(() => store.SetAndIncrNextSenderMsgSeqNum(4, "fourth"));
+    }
+
+    /// <summary>
+    /// A constructor that fails after opening some of the store's files must close them, so
+    /// the store can be opened again in-process instead of being refused by leaked handles.
+    /// The failure is real: a directory where the header file should be, so the header open
+    /// throws after .seqnums, its shadow and .body are already open.
+    /// </summary>
+    [Test]
+    public void Failed_construction_releases_the_store_files()
+    {
+        _store!.NextSenderMsgSeqNum = 5;
+        _store.Dispose();
+
+        string headerPath = Path.Combine(_storeDirectory, FileStore.Prefix(_sessionId) + ".header");
+        File.Delete(headerPath);
+        Directory.CreateDirectory(headerPath);
+        Assert.Catch<Exception>(() => _factory!.Create(_sessionId));
+        Directory.Delete(headerPath);
+
+        _store = (FileStore)_factory!.Create(_sessionId);
+        Assert.That(_store.NextSenderMsgSeqNum, Is.EqualTo(5));
+    }
+
+    /// <summary>
+    /// A .seqnums write that fails with the process alive leaves .seqnums possibly torn and the
+    /// shadow as its only witness. The next update must repair .seqnums before overwriting
+    /// that witness: if the new shadow write then tears, the torn .seqnums must not load.
+    /// </summary>
+    [Test]
+    public void Failed_seqnums_write_is_repaired_before_the_witness_is_overwritten()
+    {
+        _store!.NextTargetMsgSeqNum = 50;
+        _store.NextSenderMsgSeqNum = 99;
+
+        bool tearShadow = false;
+        // 50 bytes reach the new target digits (byte 42), so the tear really changes the witness.
+        _store.SeqNumsShadowStreamDecorator = s => new ShortWriteStream(s, () => tearShadow, landed: 50);
+        _store.Refresh();
+
+        // 99 -> 100: shadow written, then the .seqnums write fails.
+        _store.AfterSeqNumsShadowWrite = () => throw new IOException("simulated .seqnums write failure");
+        Assert.Throws<IOException>(() => _store.NextSenderMsgSeqNum = 100);
+        _store.AfterSeqNumsShadowWrite = null;
+
+        // Next update: its shadow write tears.
+        tearShadow = true;
+        Assert.Throws<IOException>(() => _store.NextTargetMsgSeqNum = 51);
+        tearShadow = false;
+        _store.SeqNumsShadowStreamDecorator = null;
+
+        RebuildStore();
+        Assert.That(_store!.NextSenderMsgSeqNum, Is.EqualTo(100));
     }
 
     private string SeqNumsPath => Path.Combine(_storeDirectory, FileStore.Prefix(_sessionId) + ".seqnums");
