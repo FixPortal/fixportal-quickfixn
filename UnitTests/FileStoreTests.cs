@@ -674,15 +674,15 @@ public class FileStoreTests
     }
 
     /// <summary>
-    /// Reset must not delete the shadow while it is still the only witness of a pending
-    /// .seqnums record: it writes that record first. Here the .seqnums write for 99 -> 100
-    /// failed, then Reset deletes the shadow but fails to delete .seqnums (another handle holds
-    /// it open without delete sharing, which refuses the delete only on Windows). The next load
-    /// must see 100, not the record the failed write left behind.
+    /// A Reset interrupted after it deleted the shadow, while a .seqnums record was pending
+    /// (so .seqnums may be torn and the shadow was its only witness), must never load that
+    /// record: the interrupted Reset completes on the next open. Here the .seqnums write for
+    /// 99 -> 100 failed, then Reset deletes the shadow but fails to delete .seqnums (another
+    /// handle holds it open without delete sharing, which refuses the delete only on Windows).
     /// </summary>
     [Test]
     [Platform("Win")]
-    public void Reset_writes_a_pending_seqnums_record_before_deleting_its_witness()
+    public void Reset_interrupted_after_deleting_the_witness_completes_on_next_open()
     {
         _store!.NextTargetMsgSeqNum = 50;
         _store.NextSenderMsgSeqNum = 99;
@@ -696,7 +696,60 @@ public class FileStoreTests
         _store.Dispose();
 
         _store = (FileStore)_factory!.Create(_sessionId);
-        Assert.That(_store.NextSenderMsgSeqNum, Is.EqualTo(100));
+        Assert.That(_store.NextSenderMsgSeqNum, Is.EqualTo(1));
+        Assert.That(_store.NextTargetMsgSeqNum, Is.EqualTo(1));
+    }
+
+    private string ResetMarkerPath => Path.Combine(_storeDirectory, FileStore.Prefix(_sessionId) + ".reset");
+
+    /// <summary>
+    /// Reset deletes several files; a crash part-way through would otherwise mix a fresh
+    /// sequence with the old session's messages (a resend could replay them). Reset records
+    /// its intent in a marker first, and an open that finds the marker completes the Reset.
+    /// </summary>
+    [Test]
+    public void Open_completes_a_reset_whose_marker_was_left_behind()
+    {
+        IMessageStore store = _store!;
+        store.SetAndIncrNextSenderMsgSeqNum(1, "first");
+        store.SetAndIncrNextSenderMsgSeqNum(2, "second");
+        store.NextTargetMsgSeqNum = 7;
+        _store!.Dispose();
+
+        File.WriteAllBytes(ResetMarkerPath, Array.Empty<byte>()); // Reset began, then the process died
+
+        _store = (FileStore)_factory!.Create(_sessionId);
+        Assert.That(_store.NextSenderMsgSeqNum, Is.EqualTo(1));
+        Assert.That(_store.NextTargetMsgSeqNum, Is.EqualTo(1));
+        var msgs = new List<string>();
+        _store.Get(1, 2, msgs);
+        Assert.That(msgs, Is.Empty);
+        Assert.That(File.Exists(ResetMarkerPath), Is.False);
+    }
+
+    /// <summary>
+    /// A Reset that fails part-way through its deletes (here .body cannot be deleted: another
+    /// handle holds it open without delete sharing, which refuses the delete only on Windows)
+    /// must not leave the old session's messages visible after the next open.
+    /// </summary>
+    [Test]
+    [Platform("Win")]
+    public void Reset_interrupted_between_its_deletes_leaves_no_old_messages()
+    {
+        IMessageStore store = _store!;
+        store.SetAndIncrNextSenderMsgSeqNum(1, "first");
+        store.SetAndIncrNextSenderMsgSeqNum(2, "second");
+
+        string bodyPath = Path.Combine(_storeDirectory, FileStore.Prefix(_sessionId) + ".body");
+        using (new FileStream(bodyPath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite))
+            Assert.Catch<IOException>(() => store.Reset());
+        _store!.Dispose();
+
+        _store = (FileStore)_factory!.Create(_sessionId);
+        Assert.That(_store.NextSenderMsgSeqNum, Is.EqualTo(1));
+        var msgs = new List<string>();
+        _store.Get(1, 2, msgs);
+        Assert.That(msgs, Is.Empty);
     }
 
     private string SeqNumsPath => Path.Combine(_storeDirectory, FileStore.Prefix(_sessionId) + ".seqnums");

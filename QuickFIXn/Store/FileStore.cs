@@ -24,6 +24,7 @@ public class FileStore : IMessageStore
     private readonly string _msgFileName;
     private readonly string _headerFileName;
     private readonly string _sessionFileName;
+    private readonly string _resetMarkerFileName;
 
     private System.IO.FileStream _seqNumsFile;
     private System.IO.Stream _seqNumsShadowFile;
@@ -78,6 +79,7 @@ public class FileStore : IMessageStore
         _msgFileName = System.IO.Path.Combine(normalizedPath, prefix + ".body");
         _headerFileName = System.IO.Path.Combine(normalizedPath, prefix + ".header");
         _sessionFileName = System.IO.Path.Combine(normalizedPath, prefix + ".session");
+        _resetMarkerFileName = System.IO.Path.Combine(normalizedPath, prefix + ".reset");
 
         // The compiler isn't smart enough to see that Open() initializes these 3 vars,
         // but we can use "= null!" to make it accept that these are non-null
@@ -105,6 +107,7 @@ public class FileStore : IMessageStore
     {
         Close();
 
+        CompleteInterruptedReset();
         ConstructFromFileCache();
         InitializeSessionCreateTime();
 
@@ -612,18 +615,32 @@ public class FileStore : IMessageStore
 
     public void Reset()
     {
-        // FP Enhancement: 2026-09-27 — a pending .seqnums record means .seqnums may be torn and
-        // the shadow is its only witness; the purge deletes that witness first. Write the record
-        // before purging, so a Reset interrupted after the shadow delete leaves a complete
-        // .seqnums. If that write fails, Reset throws before deleting anything.
-        if (_seqNumsPending is { } pending)
-        {
-            WriteSeqNums(pending);
-            _seqNumsPending = null;
-        }
+        // FP Enhancement: 2026-09-27 — the purge deletes several files, and a crash part-way
+        // through left a fresh sequence beside the old session's messages, which a resend could
+        // replay. Record the intent first: once the marker exists, the next Open() completes the
+        // purge, so a Reset either has not started or completes.
         _cache.Reset();
+        using (System.IO.File.Create(_resetMarkerFileName)) { }
         PurgeFileCache();
+        System.IO.File.Delete(_resetMarkerFileName);
         Open();
+    }
+
+    /// <summary>
+    /// FP Enhancement: 2026-09-27 — finish a Reset that was interrupted after writing its
+    /// marker. Runs with every stream closed, before anything is loaded.
+    /// </summary>
+    private void CompleteInterruptedReset()
+    {
+        if (!System.IO.File.Exists(_resetMarkerFileName))
+            return;
+        _cache.Reset();
+        PurgeSingleFile(_seqNumsShadowFileName);
+        PurgeSingleFile(_seqNumsFileName);
+        PurgeSingleFile(_msgFileName);
+        PurgeSingleFile(_headerFileName);
+        PurgeSingleFile(_sessionFileName);
+        System.IO.File.Delete(_resetMarkerFileName);
     }
 
     public void Refresh()
