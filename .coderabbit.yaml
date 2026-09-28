@@ -25,7 +25,9 @@ reviews:
     # CodeRabbit check registers at all, and pr-review-watch.sh reads a persistently absent
     # check as "not installed" and stops gating on it, letting a HIGH PR through unreviewed.
     enabled: false
-    labels: ["review-high"]
+    # `review-high-manual` is a durable manual override for an otherwise NORMAL PR and is
+    # never removed; review-tier.yml no longer re-applies `review-high` for it.
+    labels: ["review-high", "review-high-manual"]
     drafts: false
     # This repo's mainline is not the GitHub default branch, and base_branches
     # otherwise defaults to the default branch only.
