@@ -4607,7 +4607,7 @@
 				<component name="NestedParties" required="N" />
 				<field name="AllocQty" required="N" />
 				<field name="AllocText" required="N" />
-				<field name="AllocAgreementDesc" required="Y" />
+				<field name="AllocAgreementDesc" required="N" />
 				<field name="AllocAgreementDate" required="N" />
 				<field name="AllocCalcAgentLocation" required="N" />
 				<field name="AllocMatrixAgreementType" required="N" />
