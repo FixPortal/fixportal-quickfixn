@@ -416,6 +416,18 @@ public class SocketInitiatorLifecycleTests
             Interlocked.Increment(ref _created) == 1 ? new ThrowingDisposeStore() : new MemoryStore();
     }
 
+    // Re-implements IMessageStore so the session's Reset() call throws, while MemoryStore's own
+    // constructor (which calls its non-virtual Reset directly) still succeeds.
+    private sealed class ThrowingResetStore : MemoryStore, IMessageStore
+    {
+        void IMessageStore.Reset() => throw new InvalidOperationException("store reset failed");
+    }
+
+    private sealed class ThrowingResetStoreFactory : IMessageStoreFactory
+    {
+        public IMessageStore Create(SessionID sessionId) => new ThrowingResetStore();
+    }
+
     private sealed class ThrowingConnectionFailureLog : ILog
     {
         public void Clear() { }
@@ -864,6 +876,49 @@ public class SocketInitiatorLifecycleTests
             "a reader-thread cleanup failure must not escape and terminate the host process");
         Assert.That(Volatile.Read(ref completionCalls), Is.EqualTo(1),
             "reader-exit completion must run even when connection-failure logging throws");
+    }
+
+    [Test]
+    public void InitiatorClosesTheSocketWhenLogonGenerationThrows()
+    {
+        using var listener = new TcpListener(IPAddress.Loopback, 0);
+        listener.Start();
+        int port = ((IPEndPoint)listener.LocalEndpoint).Port;
+        SessionSettings settings = InitiatorSettings(port);
+        settings.Get(new SessionID("FIX.4.2", "INIT_SENDER", "INIT_TARGET"))
+            .SetBool(SessionSettings.RESET_ON_LOGON, true);
+        using var initiator = new SocketInitiator(
+            new SessionTestSupport.MockApplication(), new ThrowingResetStoreFactory(), settings,
+            (ILogFactory?)new NullLogFactory());
+        TcpClient? peer = null;
+
+        try
+        {
+            Task<TcpClient> accept = listener.AcceptTcpClientAsync();
+            initiator.Start();
+            Assert.That(accept.Wait(5000), Is.True, "the initiator should connect to the venue");
+            peer = accept.Result;
+            peer.ReceiveTimeout = 5000;
+
+            int bytesRead;
+            try
+            {
+                bytesRead = peer.GetStream().Read(new byte[4096]);
+            }
+            catch (IOException)
+            {
+                bytesRead = -1; // receive timed out: the initiator left the socket open
+            }
+
+            Assert.That(bytesRead, Is.Zero,
+                "a logon that throws must close the connection (EOF, no Logon), not leak it");
+        }
+        finally
+        {
+            initiator.Stop(force: true);
+            peer?.Dispose();
+            listener.Stop();
+        }
     }
 
     [Test]

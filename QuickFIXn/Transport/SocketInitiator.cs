@@ -131,7 +131,16 @@ public class SocketInitiator : AbstractInitiator
         }
 
         thread.Session.Log.Log(LogLevel.Information, "Connection succeeded");
-        thread.Session.Next();
+        // FP Enhancement: 2026-10-03 — a throw from the first Next() (e.g. the store failing in GenerateLogon) must tear down the connection, as Read() does; otherwise every reconnect leaks the socket, even past Stop().
+        try
+        {
+            thread.Session.Next();
+        }
+        catch (Exception ex)
+        {
+            thread.Session.Disconnect(ex.ToString());
+            throw;
+        }
         return true;
     }
 
