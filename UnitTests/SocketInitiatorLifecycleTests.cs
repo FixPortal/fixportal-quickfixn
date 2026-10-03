@@ -890,14 +890,13 @@ public class SocketInitiatorLifecycleTests
         using var initiator = new SocketInitiator(
             new SessionTestSupport.MockApplication(), new ThrowingResetStoreFactory(), settings,
             (ILogFactory?)new NullLogFactory());
-        TcpClient? peer = null;
 
         try
         {
             Task<TcpClient> accept = listener.AcceptTcpClientAsync();
             initiator.Start();
             Assert.That(accept.Wait(5000), Is.True, "the initiator should connect to the venue");
-            peer = accept.Result;
+            using TcpClient peer = accept.Result;
             peer.ReceiveTimeout = 5000;
 
             int bytesRead;
@@ -916,7 +915,6 @@ public class SocketInitiatorLifecycleTests
         finally
         {
             initiator.Stop(force: true);
-            peer?.Dispose();
             listener.Stop();
         }
     }
