@@ -117,7 +117,9 @@ public class Session : IDisposable
     /// <summary>
     /// Atomically lowers the next expected incoming sequence number by <paramref name="by"/>,
     /// without losing a concurrent receive-thread increment. Returns false (unchanged) if the
-    /// result would fall below 1 or <paramref name="by"/> is 0.
+    /// result would fall below 1 or <paramref name="by"/> is 0. <paramref name="current"/> is the
+    /// post-rewind value on true, the untouched value on false. Not idempotent: if the store's
+    /// setter throws, the in-memory value has already moved, so re-read before retrying.
     /// </summary>
     public bool TryRewindNextTargetMsgSeqNum(SeqNumType by, out SeqNumType current) =>
         _state.TryRewindNextTargetMsgSeqNum(by, out current);

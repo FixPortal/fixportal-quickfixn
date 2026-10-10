@@ -380,6 +380,11 @@ public class SessionState : IDisposable
     /// <summary>
     /// Atomically lowers the next expected incoming sequence number by <paramref name="by"/>.
     /// Fails (returns false, state unchanged) unless the result would stay at 1 or above.
+    /// <paramref name="current"/> is the post-rewind value on true, the untouched value on false.
+    /// This is a relative operation, so it is not idempotent: do not retry it blindly. If the
+    /// underlying store's setter throws (e.g. a FileStore write failure) the in-memory value has
+    /// already moved and the exception propagates; re-read <paramref name="current"/> or
+    /// <see cref="NextTargetMsgSeqNum"/> before deciding to retry.
     /// </summary>
     public bool TryRewindNextTargetMsgSeqNum(SeqNumType by, out SeqNumType current)
     {
