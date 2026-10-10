@@ -113,6 +113,15 @@ public class Session : IDisposable
         set => _state.NextTargetMsgSeqNum = value;
     }
 
+    // FP Enhancement: 2026-10-10 — adversarial finding R14, see SessionState.TryRewindNextTargetMsgSeqNum.
+    /// <summary>
+    /// Atomically lowers the next expected incoming sequence number by <paramref name="by"/>,
+    /// without losing a concurrent receive-thread increment. Returns false (unchanged) if the
+    /// result would fall below 1 or <paramref name="by"/> is 0.
+    /// </summary>
+    public bool TryRewindNextTargetMsgSeqNum(SeqNumType by, out SeqNumType current) =>
+        _state.TryRewindNextTargetMsgSeqNum(by, out current);
+
     /// <summary>
     /// Logon timeout in seconds
     /// </summary>

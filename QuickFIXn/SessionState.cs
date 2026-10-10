@@ -373,6 +373,27 @@ public class SessionState : IDisposable
         set { lock (_sync) { MessageStore.NextTargetMsgSeqNum = value; } }
     }
 
+    // FP Enhancement: 2026-10-10 — adversarial finding R14: a caller rewinding the expected
+    // incoming sequence number by get-then-set takes _sync twice, so a concurrent increment from the
+    // receive thread between the two is silently overwritten. This does the guard and the write
+    // under one acquisition.
+    /// <summary>
+    /// Atomically lowers the next expected incoming sequence number by <paramref name="by"/>.
+    /// Fails (returns false, state unchanged) unless the result would stay at 1 or above.
+    /// </summary>
+    public bool TryRewindNextTargetMsgSeqNum(SeqNumType by, out SeqNumType current)
+    {
+        lock (_sync)
+        {
+            current = MessageStore.NextTargetMsgSeqNum;
+            if (by == 0 || current <= by)
+                return false;
+            current -= by;
+            MessageStore.NextTargetMsgSeqNum = current;
+            return true;
+        }
+    }
+
     public void IncrNextSenderMsgSeqNum()
     {
         lock (_sync) { MessageStore.IncrNextSenderMsgSeqNum(); }
