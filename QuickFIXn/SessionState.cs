@@ -385,6 +385,12 @@ public class SessionState : IDisposable
     /// underlying store's setter throws (e.g. a FileStore write failure) the in-memory value has
     /// already moved and the exception propagates; re-read <paramref name="current"/> or
     /// <see cref="NextTargetMsgSeqNum"/> before deciding to retry.
+    /// <para>
+    /// A store that writes behind (the engine's shared store caches the value and persists it on a
+    /// later flush) may return true before the new value is durable: a crash before that flush
+    /// restores the pre-rewind value, and a flush rejected by a lease fence evicts the cached value,
+    /// so a later read can differ from <paramref name="current"/> without any exception here.
+    /// </para>
     /// </summary>
     public bool TryRewindNextTargetMsgSeqNum(SeqNumType by, out SeqNumType current)
     {
