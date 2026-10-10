@@ -386,11 +386,11 @@ public class SessionState : IDisposable
     /// already moved and the exception propagates; re-read <paramref name="current"/> or
     /// <see cref="NextTargetMsgSeqNum"/> before deciding to retry.
     /// <para>
-    /// A store that writes behind (the engine's shared store caches the value and persists it on a
-    /// later flush) may return true before the new value is durable: a crash before that flush
-    /// restores the last flushed value, and a flush that is lease-fenced, finds the row deleted or
-    /// sees a superseded reset epoch evicts the cached value, so a later read can differ from
-    /// <paramref name="current"/> without any exception here.
+    /// A custom <see cref="IMessageStore"/> that writes behind (caches the value and persists it on
+    /// a later flush) may return true before the new value is durable: a crash before that flush
+    /// restores the last flushed value, and a flush that fails or is rejected may discard the
+    /// cached value, so a later read can differ from <paramref name="current"/> without any
+    /// exception here. The in-repo stores do not write behind.
     /// </para>
     /// </summary>
     public bool TryRewindNextTargetMsgSeqNum(SeqNumType by, out SeqNumType current)
