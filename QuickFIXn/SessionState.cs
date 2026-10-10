@@ -388,8 +388,9 @@ public class SessionState : IDisposable
     /// <para>
     /// A store that writes behind (the engine's shared store caches the value and persists it on a
     /// later flush) may return true before the new value is durable: a crash before that flush
-    /// restores the pre-rewind value, and a flush rejected by a lease fence evicts the cached value,
-    /// so a later read can differ from <paramref name="current"/> without any exception here.
+    /// restores the last flushed value, and a flush that is lease-fenced, finds the row deleted or
+    /// sees a superseded reset epoch evicts the cached value, so a later read can differ from
+    /// <paramref name="current"/> without any exception here.
     /// </para>
     /// </summary>
     public bool TryRewindNextTargetMsgSeqNum(SeqNumType by, out SeqNumType current)
