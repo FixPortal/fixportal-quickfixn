@@ -2,34 +2,44 @@
   "schema": 1,
   "canonical": {
     "repository": "FixPortal/fixportal-agents-skills",
-    "commit": "a2ddae4b9c194ac31e54f857dedcbe1b9614823e",
-    "syncedAt": "2026-10-12"
+    "commit": "39b1670411f25b531bca3e2e4cb7c468935af475",
+    "syncedAt": "2026-10-21"
   },
   "assets": [
     {
       "path": ".github/scripts/assert_gate_coverage.py",
-      "sha256": "3c054a9afe787f6838c8076bfb3df615f2f856bc047a98ffd02f65521994d0bb",
-      "verbatim": true
+      "sha256": "192ca655c5126513965cbbfa97f50cfc0c84b055a2dbf886d77bc0b54caaa5ef",
+      "verbatim": true,
+      "commit": "39b1670411f25b531bca3e2e4cb7c468935af475",
+      "syncedAt": "2026-10-21"
     },
     {
       "path": ".github/scripts/assert_workflow_hygiene.py",
-      "sha256": "0739463ff00ef0e86221136c9061e80ab81f87aa0e5e18707da0f56c14a68ca1",
-      "verbatim": true
+      "sha256": "13fef6c40e16fa189d0b7f6fa2805da26dc3ba66f85b6ebd663a8eb868789d11",
+      "verbatim": true,
+      "commit": "39b1670411f25b531bca3e2e4cb7c468935af475",
+      "syncedAt": "2026-10-21"
     },
     {
       "path": ".github/workflows/review-policy-guard.yml",
       "sha256": "b91a68b864c0c52c2133d561700c31e7a00454a1eb3696aef3d2264f251d956b",
-      "verbatim": false
+      "verbatim": false,
+      "commit": "a2ddae4b9c194ac31e54f857dedcbe1b9614823e",
+      "syncedAt": "2026-10-12"
     },
     {
       "path": ".github/workflows/review-tier.yml",
       "sha256": "0756dedb86f4eeea0794373d363b11e54da8dc58968673fe2069368cc5834b59",
-      "verbatim": false
+      "verbatim": false,
+      "commit": "a2ddae4b9c194ac31e54f857dedcbe1b9614823e",
+      "syncedAt": "2026-10-12"
     },
     {
       "path": "scripts/summarize-stryker.ps1",
       "sha256": "f8e5604562f101b863db00607db8663fd8cfdb0652b0bbffbe73393df6cdf592",
-      "verbatim": true
+      "verbatim": true,
+      "commit": "a2ddae4b9c194ac31e54f857dedcbe1b9614823e",
+      "syncedAt": "2026-10-12"
     }
   ]
 }
