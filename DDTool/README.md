@@ -19,17 +19,22 @@ Typically invoked via the wrapper script:
 
 ### DDTool modifications
 
-The only DDTool modification is in `Structures/DataDictionary.cs`, which adds an
+The only DDTool modification is in `DDTool/Structures/DataDictionary.cs`, which adds an
 ordering enhancement to ensure specs are processed in the correct order during field
-aggregation. DDTool itself is otherwise unmodified from upstream — the FixPortal specs
+aggregation: `Identifier` prepends a sort key from a hard-coded table (`_fixPortalDesiredOrder`:
+FIX 4.0=1, 4.1=2, 4.3=3, 5.0=4, 5.0 SP1=5, 5.0 SP2=6, FIXT 1.1=7, 4.2 and 4.4=8) and
+`IdentifierNoDots` strips it again so generated names stay `FIX44` etc. DDTool itself is otherwise
+unmodified from upstream (diff against tag `v1.14.1`) — the FixPortal specs
 use only standard FIX field types that upstream DDTool already supports.
 
 ### Spec file organisation
 
 FixPortal data dictionaries live in `spec/FixPortal/` (a legacy directory name kept
 for path stability) rather than `spec/fix/`. Files are numbered with a prefix that
-controls processing order, which matters because DDTool's field aggregation uses
-"latest version wins" semantics:
+`scripts/Generate-Message-Sources.ps1` sorts on before passing them to DDTool. DDTool then
+orders the dictionaries itself by `Identifier` (table above), not by file name, which matters because
+its field aggregation uses "latest version wins" semantics. Note the file prefixes and the
+internal sort keys differ (the SP2 file is `10_` but sorts as 6):
 
 ```
 1_FIX40.xml          Standard FIX 4.0
@@ -43,9 +48,11 @@ controls processing order, which matters because DDTool's field aggregation uses
 10_FIX50SP2_FP_QF.xml   Customised FIX 5.0 SP2 (replaces standard FIX 5.0 SP2)
 ```
 
-Customised specs use a `name` attribute on the root `<fix>` element (e.g.
-`name="FIX42_FP_QF"`) so they can coexist with the standard versions without
-triggering DDTool's duplicate-name check.
+Customised specs carry a `name` attribute on the root `<fix>` element (e.g.
+`name="FIX42_FP_QF"`), but DDTool ignores it: the duplicate-name check uses the
+`customname` attribute (`Parsers/VersionParser.cs:33`), which no spec here sets.
+The customised and standard dictionaries do not clash because only `spec/FixPortal/`
+is passed to DDTool, so each FIX version appears once.
 
 ### Generation script
 
