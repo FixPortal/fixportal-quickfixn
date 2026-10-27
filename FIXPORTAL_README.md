@@ -43,7 +43,8 @@ All of these are fork additions (each carries an `FP Enhancement` banner in sour
 - `QuickFIXn/IApplicationMessageRejection.cs` — optional interface an application implements alongside
   `IApplication`. `Session.NotifyMessageRejected` calls `OnMessageRejected(rejectMessage, originalMessage,
   sessionId, reason, referencedMessageWasResent)` after `FromAdmin` for every inbound session-level Reject
-  (msgtype 3). A four-argument overload also exists; the five-argument one is a default interface method that
+  (msgtype 3), but only when the application implements this interface; otherwise it returns immediately
+  (`Session.cs:1942-1945`). A four-argument overload also exists; the five-argument one is a default interface method that
   forwards to it. `originalMessage` is looked up by `RefSeqNum` and is null when the store no longer has it.
   Exceptions thrown by the callback are caught and logged.
 - `ILog.OnRejectionEvent(originalMessage, eventText)` — default no-op on `ILog` (also `LogOn`, `LogOff`,
