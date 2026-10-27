@@ -3,6 +3,10 @@
 ![Build status](https://github.com/connamara/quickfixn/actions/workflows/dotnet.yml/badge.svg)
 [![NuGet Version](https://img.shields.io/nuget/v/QuickFIXn.Core)](https://www.nuget.org/packages/QuickFIXn.Core/)
 
+This is the FixPortal fork of QuickFIX/n; its `fpsim` branch is upstream `v1.14.1` plus the changes
+described in [FIXPORTAL_README.md](FIXPORTAL_README.md) (custom dictionaries, rejection hooks,
+packaging). The badges above refer to upstream, not the fork.
+
 For tutorials on how to use QuickFIX/n, visit the [website](http://quickfixn.org/tutorial/creating-an-application.html).
 
 This README is about setting up your system to do QuickFIX/n
@@ -11,7 +15,8 @@ development.
 System Setup
 ------------
 
-* This project uses .NET 8 starting with version 1.13.
+* This project uses .NET 8 starting with version 1.13. The fork's libraries target `net8.0` and `net10.0`;
+  the test projects target `net10.0`, so building them needs the .NET 10 SDK.
 
 * All scripts are in Powershell, and should work on both Windows and Unix-based platforms.
 
@@ -39,7 +44,7 @@ The simplest spin-up instructions are:
 
 To run *only* UTs or *only* ATs:
 * `dotnet test UnitTests`
-* `dotnet test AcceptanceTests`
+* `dotnet test AcceptanceTest`
 
 To get more detail in the test ouput:
 * `dotnet test -l "console;verbosity=detailed" AcceptanceTest`
@@ -48,7 +53,7 @@ To run a specific suite, use ``--filter``, e.g.
 * `dotnet test --filter Fix44Test AcceptanceTest`
 (`Fix44Test` is the `TestCaseSource` function in Fix44.cs)
 
-AcceptanceTest logs are output to `bin/Debug/net8.0/log`.
+AcceptanceTest logs are output to `bin/Debug/net10.0/log`.
 
 
 Credits

@@ -1,5 +1,9 @@
 # 10_FIX50_FP_QF.xml — EP302 Merge Report
 
+> Historical record. `10_FIX50_FP_QF.xml` is not present in `spec/FixPortal/` (nor in this branch's history);
+> the generated FIX 5.0 SP2 dictionary is `10_FIX50SP2_FP_QF.xml`, built from `spec/fix/FIX50SP2.xml` by
+> `scripts/build_fix50_fp.py`. The tooling in `orchestra/` still targets the old output name.
+
 **Date:** 2026-04-04
 **Sources:** `FIX_Latest_EP302.xml` (base, Orchestra EP302) + `9_FIX44_FP_QF.xml` (FixPortal additions)
 **Output:** `10_FIX50_FP_QF.xml` — FIX 5.0 application dictionary (empty header/trailer)

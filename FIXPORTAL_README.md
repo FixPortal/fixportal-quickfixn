@@ -22,17 +22,38 @@ For general QuickFIX/n documentation, refer to the upstream `README.md`.
 | Branch       | Purpose                                                                      |
 |--------------|------------------------------------------------------------------------------|
 | `master`     | Tracks upstream `master`                                                     |
-| `fpsim`      | FixPortal deployment branch — upstream `v1.14.0` + FixPortal enhancements    |
+| `fpsim`      | FixPortal deployment branch — upstream `v1.14.1` + FixPortal enhancements    |
 
 ### FixPortal-specific content
 
 - `spec/FixPortal/` — Custom data-dictionary XML files (legacy directory name)
 - `scripts/Generate-Message-Sources.ps1` — Uses the custom specs
-- `DDTool/Structures/DataDictionary.cs` — Ordering enhancements for spec processing
+- `DDTool/DDTool/Structures/DataDictionary.cs` — Ordering enhancements for spec processing
+- `DataDictionaries/FixPortal.QuickFIXn.DataDictionaries.csproj` — Content-only package that ships `spec/FixPortal/*.xml`
+- `.github/workflows/fixportal-ci.yml` — Build, test and publish workflow for `fpsim`
 - FixPortal enhancements throughout `QuickFIXn/`, marked with a single-line banner of the form
   `// FP Enhancement: YYYY-MM-DD — <one-line rationale>.` (matching the convention used in the
   FixPortal FixAtdl repo). Older `// FixPortal Enhancement` markers and `#region FixPortal Enhancement`
   blocks may still appear in unreviewed corners; convert on touch.
+
+### Rejection and diagnostic hooks
+
+All of these are fork additions (each carries an `FP Enhancement` banner in source):
+
+- `QuickFIXn/IApplicationMessageRejection.cs` — optional interface an application implements alongside
+  `IApplication`. `Session.NotifyMessageRejected` calls `OnMessageRejected(rejectMessage, originalMessage,
+  sessionId, reason, referencedMessageWasResent)` after `FromAdmin` for every inbound session-level Reject
+  (msgtype 3). A four-argument overload also exists; the five-argument one is a default interface method that
+  forwards to it. `originalMessage` is looked up by `RefSeqNum` and is null when the store no longer has it.
+  Exceptions thrown by the callback are caught and logged.
+- `ILog.OnRejectionEvent(originalMessage, eventText)` — default no-op on `ILog` (also `LogOn`, `LogOff`,
+  `OnIncomingAndOutgoing`); `Session` raises it when it rejects an inbound message, with the raw message
+  redacted per `RedactFieldsInLogs`.
+- `IFixWireTap` and `IOutboundSendJournal` (`QuickFIXn/IFixWireTap.cs`, `QuickFIXn/IOutboundSendJournal.cs`) —
+  optional observation and durable-journal seams, accepted by `SessionFactory`, `SocketInitiator` and
+  `ThreadedSocketAcceptor`.
+- `Session.TryRewindNextTargetMsgSeqNum(by, out current)`, `Session.LastDisconnectReason` and
+  `Session.LogoutReason`.
 
 ## Performance harness
 
@@ -77,7 +98,7 @@ banners where practical (older `// FixPortal Enhancement` markers may also appea
 when in doubt, take the upstream change and re-apply the FixPortal modification on
 top, then convert the marker to the banner format if it isn't already.
 
-The `DDTool/Structures/DataDictionary.cs` model class (~86 lines) is distinct
+The `DDTool/DDTool/Structures/DataDictionary.cs` model class (~113 lines) is distinct
 from the runtime `QuickFIXn/DataDictionary/DataDictionary.cs` (700+ lines);
 do not confuse them during merges.
 
@@ -100,19 +121,36 @@ dotnet test
 
 ### 5. Pack and publish
 
-The packable projects — `QuickFIXn/QuickFix.csproj`, `Messages/*/QuickFix.*.csproj`, and
-`DataDictionaries/FixPortal.QuickFIXn.DataDictionaries.csproj` (11 in total) — each carry a
-`<Version>` and `<PackageId>FixPortal.QuickFIXn.*</PackageId>`.
-Bump `<Version>` on all 11 (e.g. `1.14.0-fixportal.1` → `1.14.0-fixportal.2`,
-or move to the new upstream base such as `1.15.0-fixportal.1` after an
-upstream merge).
+The packable projects — `QuickFIXn/QuickFix.csproj` (`FixPortal.QuickFIXn.Core`), the eight
+`Messages/*/QuickFix.*.csproj` (`FixPortal.QuickFIXn.FIX40` … `FixPortal.QuickFIXn.FIXT11`), and
+`DataDictionaries/FixPortal.QuickFIXn.DataDictionaries.csproj` (10 in total) — each carry their own
+`<Version>` and a `<PackageId>` of the form `FixPortal.QuickFIXn.*`. The versions are not kept in
+lockstep: bump a project when its shipped content changes (for example Core is at
+`1.14.1-fixportal.13`, the Messages projects at `.8`, DataDictionaries at `.10`). After an upstream
+merge, move to the new base such as `1.15.0-fixportal.1`. `scripts/Bump-Versions.ps1` is upstream's script;
+it covers Core and the Messages projects but not DataDictionaries, which must be edited by hand.
 
 ```bash
 dotnet pack QuickFIXn.sln -c Release -o _pkgout
 ```
 
-Debug symbols are embedded (`<DebugType>embedded</DebugType>`), so no separate
-symbol packages are produced.
+Debug symbols are embedded (`<DebugType>embedded</DebugType>`) in Core and the Messages projects, so no
+separate symbol packages are produced. DataDictionaries is content-only (`IncludeBuildOutput` is false).
+
+Pushes to `fpsim` that pass `build` and `acceptance` run the same `dotnet pack` in
+`.github/workflows/fixportal-ci.yml` and push `_pkgout/*.nupkg` to the FixPortal GitHub Packages NuGet feed
+(`https://nuget.pkg.github.com/FixPortal/index.json`) with `--skip-duplicate`, so a project whose
+`<Version>` was not bumped is not republished.
+
+### 6. Consuming the fork
+
+`nuget.config` maps the package pattern `FixPortal.*` to the `github-fixportal` source above and reads the
+token from the `GITHUB_PACKAGES_TOKEN` environment variable; every other package comes from nuget.org.
+Reference `FixPortal.QuickFIXn.Core` plus the `FixPortal.QuickFIXn.FIXnn` message package for each FIX version
+you use. `FixPortal.QuickFIXn.DataDictionaries` ships the dictionaries as NuGet content under
+`DataDictionary/`; copy them to the build output and point the session's `DataDictionary` settings at them.
+UNVERIFIED: that a read-only token is sufficient to restore from the feed; refuted if a restore with a token
+holding only `read:packages` fails.
 
 ## Spec maintenance
 
@@ -126,15 +164,24 @@ QuickFIX/n specs in `spec/fix/`. The approach:
 - The customised FIX 5.0 SP2 spec (`10_FIX50SP2_FP_QF.xml`) is built from the
   upstream FIX50SP2.xml with FixPortal additions merged in. `scripts/build_fix50_fp.py`
   can regenerate it from the upstream base and the FIX44 source
-- Custom specs use a `name` attribute on the root `<fix>` element (e.g.
-  `name="FIX50SP2_FP_QF"`) to avoid DDTool's duplicate-name check
+- The customised specs carry a `name` attribute on the root `<fix>` element (e.g.
+  `name="FIX50SP2_FP_QF"`). DDTool does not read it: its duplicate-name check keys on
+  the optional `customname` attribute (`DDTool/DDTool/Parsers/VersionParser.cs:33`), which no spec here
+  sets. Duplicates are avoided because `spec/fix/` is not in the input set, so only one dictionary
+  per FIX version is generated
+- The simulator control tags `5001` (`FpSimStrategyIdentifier`), `5099` (`FpSimStrategyVersion`) and
+  `5100`-`5113` (`FpSimResponseTimeMin` … `FpSimRejectInboundOrders`) are defined in all three customised
+  specs (`8_FIX42_FP_QF.xml`, `9_FIX44_FP_QF.xml`, `10_FIX50SP2_FP_QF.xml`) as optional fields on
+  `NewOrderSingle` (commit `6aaf1129`)
 
 ### Known tag collisions (custom FIX44 vs FIX50SP2)
 
 Several custom tags in the FIX44 spec collide with standard FIX50SP2 tags. When
 building the custom FIX50SP2 spec, FIX50SP2 definitions take precedence:
 
-- **Tags 1586-1605**: Custom `LegPosAmt` fields vs FIX50SP2 `RelationshipRisk` fields
+- **Tags 1586-1605**: Custom fields in this range (`NoLegPosAmt`, `LegPosAmt`, `LegPosAmtType`, `LegQtyType`,
+  `FIXEngineName`/`Version`/`Vendor`, `ApplicationSystemName`/`Version`/`Vendor`) vs FIX50SP2
+  `RelationshipRisk` fields
 - **Tag 800**: Custom `NOE` (CHAR) vs FIX50SP2 `OrderBookingQty` (QTY)
 - **Tag 327**: Custom `HaltReason` (CHAR) vs FIX50SP2 `HaltReasonInt` (INT)
 - **Tags 22086-22091**: Custom `PartyAltID` fields — superseded by FIX50SP2 tags 1516-1521

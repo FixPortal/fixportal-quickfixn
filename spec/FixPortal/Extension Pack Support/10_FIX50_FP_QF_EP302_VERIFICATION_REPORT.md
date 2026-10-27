@@ -1,7 +1,7 @@
 # 10_FIX50_FP_QF.xml — EP302 Rebuild Verification Report
 
 **Date:** 2026-04-04
-**File:** `QFService/quickfix-n/spec/FixPortal/10_FIX50_FP_QF.xml` (53,219 lines)
+**File:** `spec/FixPortal/10_FIX50_FP_QF.xml` (53,219 lines; not present in this branch, see the note in the merge report)
 **Sources:** `FIX_Latest_EP302.xml` (Orchestra EP302, 2026-03-20) + `9_FIX44_FP_QF.xml` (FixPortal additions)
 
 ---
