@@ -56,6 +56,7 @@
     ".claude/review-policy.json",
     ".coderabbit.yaml",
     "nuget.config",
+    "global.json",
     "spec/**",
     "DataDictionaries/**",
     "DDTool/**",
