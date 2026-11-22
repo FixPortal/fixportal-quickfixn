@@ -29,10 +29,10 @@
     },
     {
       "path": ".github/workflows/review-tier.yml",
-      "sha256": "0756dedb86f4eeea0794373d363b11e54da8dc58968673fe2069368cc5834b59",
+      "sha256": "0dbef7fd290d8a3093652cba8d26e5e65c4caee9cc4ec2ea4d7d327ffce88cbe",
       "verbatim": false,
-      "commit": "a2ddae4b9c194ac31e54f857dedcbe1b9614823e",
-      "syncedAt": "2026-10-12"
+      "commit": "a5599589ee609c516fa8832f1b9e89e984309388",
+      "syncedAt": "2026-11-22"
     },
     {
       "path": "scripts/summarize-stryker.ps1",
