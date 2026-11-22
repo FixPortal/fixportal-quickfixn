@@ -2,23 +2,23 @@
   "schema": 1,
   "canonical": {
     "repository": "FixPortal/fixportal-agents-skills",
-    "commit": "f2e5ef554d46764bb6c84843f8d99fccc2797e96",
-    "syncedAt": "2026-11-18"
+    "commit": "ce1419348ec3562f3b567ac8a47ab85fadfc8f6d",
+    "syncedAt": "2026-11-22"
   },
   "assets": [
     {
       "path": ".github/scripts/assert_gate_coverage.py",
-      "sha256": "b698ad9a7f11f4c9e4ef15ca0f12531d78c93a5bb2630192a8a639f4571093e7",
+      "sha256": "a89469c79dc6365e1b955714a746c77ed8df43d99efd46fd3043811f8994f1db",
       "verbatim": true,
-      "commit": "f2e5ef554d46764bb6c84843f8d99fccc2797e96",
-      "syncedAt": "2026-11-18"
+      "commit": "ce1419348ec3562f3b567ac8a47ab85fadfc8f6d",
+      "syncedAt": "2026-11-22"
     },
     {
       "path": ".github/scripts/assert_workflow_hygiene.py",
-      "sha256": "45537429fdb7df4e29c38ea458273745a31cad8c56c3e8f75b45624e78e8251a",
+      "sha256": "58828b7f85f29881a8d1e733cebfc04413e15f2d3fe6e54406a5b9dc22ee3612",
       "verbatim": true,
-      "commit": "f2e5ef554d46764bb6c84843f8d99fccc2797e96",
-      "syncedAt": "2026-11-18"
+      "commit": "ce1419348ec3562f3b567ac8a47ab85fadfc8f6d",
+      "syncedAt": "2026-11-22"
     },
     {
       "path": ".github/workflows/review-policy-guard.yml",
